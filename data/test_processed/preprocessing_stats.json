@@ -1,0 +1,10 @@
+{
+  "total_raw_samples": 1186,
+  "total_clean_samples": 1186,
+  "train_samples": 948,
+  "val_samples": 178,
+  "test_samples": 60,
+  "train_ratio": 0.8,
+  "val_ratio": 0.15,
+  "test_ratio": 0.05
+}

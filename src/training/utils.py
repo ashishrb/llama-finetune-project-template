@@ -69,8 +69,8 @@ class TrainingConfig:
             dataloader_num_workers=config.get('dataloader_num_workers', 4),
             remove_unused_columns=config.get('remove_unused_columns', False),
             
-            # Evaluation and saving
-            evaluation_strategy=config.get('eval_strategy', 'steps'),
+            # Evaluation and saving - FIXED PARAMETER NAMES
+            eval_strategy=config.get('eval_strategy', 'steps'),  # Changed from evaluation_strategy
             eval_steps=config.get('eval_steps', 50),
             save_strategy=config.get('save_strategy', 'steps'),
             save_steps=config.get('save_steps', 100),
@@ -80,7 +80,7 @@ class TrainingConfig:
             greater_is_better=config.get('greater_is_better', False),
             
             # Logging
-            logging_strategy='steps',
+            logging_strategy='steps',  # This should be fine
             logging_steps=config.get('logging_steps', 10),
             report_to=['mlflow', 'tensorboard'],
             
