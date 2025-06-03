@@ -1,0 +1,53 @@
+# config/deployment_config.yaml
+deployment:
+  endpoint_name: "llama-corporate-qa-endpoint"
+  deployment_name: "llama-corporate-qa-deployment"
+  
+  # Compute configuration for inference
+  instance_type: "Standard_NC24ads_A100_v4"  # A100 GPU for inference
+  instance_count: 1
+  
+  # Auto-scaling
+  scale_settings:
+    type: "default"
+    min_instances: 1
+    max_instances: 3
+    target_utilization_percentage: 70
+    scale_up_time: "PT5M"
+    scale_down_time: "PT5M"
+  
+  # Request settings
+  request_timeout_ms: 90000
+  max_concurrent_requests_per_instance: 1
+  max_queue_wait_ms: 60000
+  
+  # Model settings
+  model:
+    path: "./output/models"
+    format: "mlflow"
+    
+  # Environment
+  environment:
+    name: "llama-inference-env"
+    conda_file: "inference_environment.yaml"
+    
+  # Resource requirements
+  resources:
+    memory: "32Gi"
+    cpu: "8"
+    gpu: "1"
+    
+  # Health probe
+  liveness_probe:
+    initial_delay: 30
+    period: 30
+    timeout: 2
+    success_threshold: 1
+    failure_threshold: 30
+    
+  readiness_probe:
+    initial_delay: 30
+    period: 30
+    timeout: 2
+    success_threshold: 1
+    failure_threshold: 3

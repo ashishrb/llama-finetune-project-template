@@ -1,0 +1,27 @@
+# config/azure_config.yaml
+azure:
+  subscription_id: "ad8aa3a4-682b-4577-9430-1224a2db6813"
+  resource_group: "rg-746582ai"
+  workspace_name: "ms-session-2-uk-south"
+  location: "uksouth"
+
+compute:
+  cluster_name: "llama-h100-cluster"
+  vm_size: "Standard_NC40ads_H100_v5"
+  min_nodes: 0
+  max_nodes: 4
+  idle_seconds_before_scaledown: 300
+  
+environment:
+  name: "llama-finetune-env"
+  conda_file: "environment.yaml"
+  docker:
+    base_image: "mcr.microsoft.com/azureml/openmpi4.1.0-cuda11.8-cudnn8-ubuntu20.04"
+
+experiment:
+  name: "llama-3.2-2b-finetune"
+  description: "Fine-tuning Llama-3.2-2B on corporate Q&A dataset"
+
+datastore:
+  name: "workspaceblobstore"
+  container_name: "azureml-blobstore-*"

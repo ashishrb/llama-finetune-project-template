@@ -1,0 +1,39 @@
+# config/model_config.yaml
+model:
+  name: "llama-3.2-2b-corporate-qa"
+  base_model: "unsloth/llama-3.2-2b-instruct"
+  
+  # Model parameters
+  max_position_embeddings: 2048
+  rope_theta: 500000.0
+  use_cache: true
+  
+  # Generation parameters
+  generation:
+    max_new_tokens: 512
+    temperature: 0.7
+    top_p: 0.9
+    top_k: 50
+    repetition_penalty: 1.1
+    do_sample: true
+    pad_token_id: 128001  # Llama 3.2 pad token
+    eos_token_id: 128009  # Llama 3.2 eos token
+    
+tokenizer:
+  model_name: "unsloth/llama-3.2-2b-instruct"
+  add_eos_token: true
+  add_bos_token: true
+  truncation: true
+  padding: true
+  
+quantization:
+  load_in_4bit: true
+  bnb_4bit_compute_dtype: "float16"
+  bnb_4bit_quant_type: "nf4"
+  bnb_4bit_use_double_quant: true
+
+# Unsloth specific optimizations
+unsloth:
+  max_seq_length: 2048
+  dtype: "float16"  # Use float16 for H100
+  load_in_4bit: true
