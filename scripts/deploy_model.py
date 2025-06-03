@@ -7,6 +7,7 @@ import argparse
 import time
 from pathlib import Path
 from datetime import datetime
+from src.training.utils import GPUMemoryManager, log_system_resources
 
 from azure.ai.ml import MLClient
 from azure.ai.ml.entities import (
@@ -53,6 +54,29 @@ def validate_model_artifacts(model_path: str) -> bool:
         print("   Run training first: python scripts/submit_training.py")
         return False
     
+    # ADD THIS: Initialize memory manager and check system resources
+    memory_manager = GPUMemoryManager()
+    log_system_resources()
+    
+    # ADD THIS: Estimate model size and validate against available memory
+    model_size_gb = _estimate_model_size(model_dir)
+    print(f"📏 Estimated model size: {model_size_gb:.2f}GB")
+    
+    # Check if we have enough memory for model validation
+    memory_info = memory_manager.get_gpu_memory_info()
+    if memory_info['total_gb'] > 0:  # GPU available
+        available_memory = memory_info['total_gb'] - memory_info['allocated_gb']
+        if model_size_gb > available_memory * 0.8:  # Use 80% as safety margin
+            print(f"⚠️  Warning: Model size ({model_size_gb:.2f}GB) may exceed available GPU memory ({available_memory:.2f}GB)")
+            print("   Consider using CPU deployment or larger GPU instance")
+    
+    # Check for essential files
+    required_files = [
+        "config.json",
+        "tokenizer.json", 
+        "tokenizer_config.json"
+    ]
+
     # Check for essential files
     required_files = [
         "config.json",
@@ -81,6 +105,41 @@ def validate_model_artifacts(model_path: str) -> bool:
     
     return True
 
+def _estimate_model_size(model_dir: Path) -> float:
+    """Estimate model size in GB based on files."""
+    total_size = 0
+    
+    # Get sizes of all model files
+    model_files = list(model_dir.glob("*.bin")) + list(model_dir.glob("*.safetensors"))
+    
+    for file_path in model_files:
+        if file_path.exists():
+            total_size += file_path.stat().st_size
+    
+    # If no model files found, estimate based on config
+    if total_size == 0:
+        config_file = model_dir / "config.json"
+        if config_file.exists():
+            try:
+                import json
+                with open(config_file, 'r') as f:
+                    config = json.load(f)
+                
+                # Rough estimation based on model parameters
+                vocab_size = config.get('vocab_size', 32000)
+                hidden_size = config.get('hidden_size', 2048)
+                num_layers = config.get('num_hidden_layers', 24)
+                
+                # Rough calculation: parameters * 2 bytes (float16)
+                estimated_params = vocab_size * hidden_size + num_layers * hidden_size * hidden_size * 4
+                total_size = estimated_params * 2  # 2 bytes per parameter for float16
+                
+            except Exception as e:
+                print(f"⚠️  Could not estimate model size from config: {e}")
+                total_size = 4 * 1024**3  # Default 4GB estimate
+    
+    return total_size / (1024**3)  # Convert to GB
+
 def create_inference_script():
     """Create the inference script for the endpoint."""
     inference_script = '''
@@ -88,8 +147,42 @@ import json
 import torch
 import logging
 import os
+import gc
+import psutil
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import PeftModel
+
+# ADD THIS: Memory management utilities
+class InferenceMemoryManager:
+    """Lightweight memory manager for inference."""
+    
+    def __init__(self):
+        self.peak_memory = 0
+        
+    def get_gpu_memory_info(self):
+        """Get GPU memory information."""
+        if not torch.cuda.is_available():
+            return {'allocated_gb': 0, 'total_gb': 0, 'usage_percent': 0}
+        
+        allocated = torch.cuda.memory_allocated() / 1024**3
+        total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        self.peak_memory = max(self.peak_memory, allocated)
+        
+        return {
+            'allocated_gb': allocated,
+            'total_gb': total,
+            'usage_percent': allocated / total if total > 0 else 0,
+            'peak_gb': self.peak_memory
+        }
+    
+    def cleanup_memory(self):
+        """Clean up GPU memory."""
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+
+# Global memory manager
+memory_manager = InferenceMemoryManager()
 
 def init():
     """Initialize the model and tokenizer."""
@@ -101,10 +194,19 @@ def init():
     try:
         model_path = os.environ.get("AZUREML_MODEL_DIR", "./model")
         
+        # ADD THIS: Log initial memory state
+        memory_info = memory_manager.get_gpu_memory_info()
+        logging.info(f"Initial GPU memory: {memory_info['allocated_gb']:.2f}GB / {memory_info['total_gb']:.2f}GB")
+        
         # Load tokenizer
         tokenizer = AutoTokenizer.from_pretrained(model_path)
         tokenizer.pad_token = tokenizer.eos_token
         tokenizer.padding_side = "right"
+        
+        # ADD THIS: Check memory before model loading
+        if memory_info['total_gb'] > 0:  # GPU available
+            available_memory = memory_info['total_gb'] - memory_info['allocated_gb']
+            logging.info(f"Available GPU memory before model load: {available_memory:.2f}GB")
         
         # Load base model
         model = AutoModelForCausalLM.from_pretrained(
@@ -121,10 +223,15 @@ def init():
             model = model.merge_and_unload()  # Merge LoRA weights
         
         model.eval()
-        logging.info("Model initialized successfully")
+        
+        # ADD THIS: Log memory after model loading
+        final_memory = memory_manager.get_gpu_memory_info()
+        logging.info(f"Model loaded successfully. GPU memory: {final_memory['allocated_gb']:.2f}GB / {final_memory['total_gb']:.2f}GB ({final_memory['usage_percent']:.1%})")
         
     except Exception as e:
         logging.error(f"Error initializing model: {e}")
+        # ADD THIS: Cleanup on error
+        memory_manager.cleanup_memory()
         raise e
 
 def run(raw_data):
@@ -141,7 +248,17 @@ def run(raw_data):
         
         responses = []
         
-        for input_data in inputs:
+        # ADD THIS: Monitor memory for batch processing
+        if len(inputs) > 10:
+            logging.info(f"Processing large batch: {len(inputs)} requests")
+            memory_info = memory_manager.get_gpu_memory_info()
+            logging.info(f"Memory before batch: {memory_info['allocated_gb']:.2f}GB ({memory_info['usage_percent']:.1%})")
+        
+        for i, input_data in enumerate(inputs):
+            # ADD THIS: Memory cleanup every 20 requests in large batches
+            if i > 0 and i % 20 == 0:
+                memory_manager.cleanup_memory()
+            
             # Extract input text
             if "messages" in input_data:
                 # Chat format
@@ -162,10 +279,17 @@ def run(raw_data):
             response = generate_response(text, input_data)
             responses.append(response)
         
+        # ADD THIS: Log final memory state for large batches
+        if len(inputs) > 10:
+            final_memory = memory_manager.get_gpu_memory_info()
+            logging.info(f"Batch completed. Final memory: {final_memory['allocated_gb']:.2f}GB, Peak: {final_memory['peak_gb']:.2f}GB")
+        
         # Return single response or list
         return responses[0] if len(responses) == 1 else responses
         
     except Exception as e:
+        # ADD THIS: Cleanup on error
+        memory_manager.cleanup_memory()
         return {"error": str(e)}
 
 def format_chat_messages(messages):
@@ -252,31 +376,46 @@ def register_model(ml_client: MLClient, model_path: str, model_name: str) -> Mod
     """Register the trained model in Azure ML."""
     print("📝 Registering model in Azure ML...")
     
+    # ADD THIS: Memory and size validation
+    memory_manager = GPUMemoryManager()
+    model_size_gb = _estimate_model_size(Path(model_path))
+
+    print(f"📊 Model registration info:")
+    print(f"   Model size: {model_size_gb:.2f}GB")
+    print(f"   Available memory: {memory_manager.get_gpu_memory_info()['total_gb']:.2f}GB")
+    
+    # Check if model size is reasonable for deployment
+    if model_size_gb > 50:  # Very large model
+        print(f"⚠️  Warning: Large model size ({model_size_gb:.2f}GB) may cause deployment issues")
+        print("   Consider model compression or larger deployment instances")
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
     try:
-        model = Model(
-            name=model_name,
-            version=timestamp,
-            description="Fine-tuned Llama-3.2-2B for corporate Q&A",
-            type="custom_model",
-            path=model_path,
-            tags={
-                "framework": "transformers",
-                "task": "text-generation",
-                "base_model": "llama-3.2-2b",
-                "fine_tuning": "unsloth"
-            }
-        )
-        
-        registered_model = ml_client.models.create_or_update(model)
-        
-        print(f"✅ Model registered successfully")
-        print(f"   Name: {registered_model.name}")
-        print(f"   Version: {registered_model.version}")
-        
-        return registered_model
-        
+            model = Model(
+                name=model_name,
+                version=timestamp,
+                description=f"Fine-tuned Llama-3.2-2B for corporate Q&A (Size: {model_size_gb:.1f}GB)",
+                type="custom_model",
+                path=model_path,
+                tags={
+                    "framework": "transformers",
+                    "task": "text-generation",
+                    "base_model": "llama-3.2-2b",
+                    "fine_tuning": "unsloth",
+                    "model_size_gb": f"{model_size_gb:.2f}",
+                    "memory_optimized": "true"
+                }
+            )
+            
+            registered_model = ml_client.models.create_or_update(model)
+            
+            print(f"✅ Model registered successfully")
+            print(f"   Name: {registered_model.name}")
+            print(f"   Version: {registered_model.version}")
+            
+            return registered_model
+            
     except Exception as e:
         print(f"❌ Failed to register model: {e}")
         raise e
@@ -327,8 +466,22 @@ def create_deployment(
     
     config = deployment_config['deployment']
     deployment_name = config['deployment_name']
+    instance_type = config['instance_type']
     
     print(f"🚀 Creating deployment: {deployment_name}")
+    
+    instance_memory_gb = _get_instance_memory(instance_type)
+    model_size_gb = float(model.tags.get('model_size_gb', '8.0'))
+    
+    print(f"💾 Memory validation:")
+    print(f"   Instance type: {instance_type}")
+    print(f"   Instance memory: {instance_memory_gb}GB")
+    print(f"   Model size: {model_size_gb}GB")
+    print(f"   Memory ratio: {(model_size_gb / instance_memory_gb * 100):.1f}%")
+    
+    if model_size_gb > instance_memory_gb * 0.7:  # Model uses >70% of instance memory
+        print(f"⚠️  Warning: Model size ({model_size_gb:.1f}GB) may be too large for instance ({instance_memory_gb}GB)")
+        print("   Consider using a larger instance type")
     
     # Create inference environment
     inference_env = Environment(
@@ -379,6 +532,20 @@ def create_deployment(
     except Exception as e:
         print(f"❌ Failed to create deployment: {e}")
         raise e
+
+def _get_instance_memory(instance_type: str) -> float:
+    """Get approximate memory in GB for Azure ML instance types."""
+    # Common Azure ML instance memory mappings (approximate)
+    memory_map = {
+        'Standard_NC6s_v3': 112,      # 6 vCPU, 112 GB RAM
+        'Standard_NC12s_v3': 224,     # 12 vCPU, 224 GB RAM
+        'Standard_NC24s_v3': 448,     # 24 vCPU, 448 GB RAM
+        'Standard_NC24ads_A100_v4': 220,  # 24 vCPU, 220 GB RAM
+        'Standard_NC40ads_H100_v5': 440,  # 40 vCPU, 440 GB RAM
+        'Standard_ND40rs_v2': 672,    # 40 vCPU, 672 GB RAM
+    }
+    
+    return memory_map.get(instance_type, 64)  # Default 64GB if unknown
 
 def set_traffic_to_deployment(ml_client: MLClient, endpoint_name: str, deployment_name: str):
     """Set 100% traffic to the new deployment."""
@@ -454,6 +621,7 @@ def print_deployment_summary(endpoint, deployment, deployment_config: dict):
 def main():
     """Main deployment function."""
     parser = argparse.ArgumentParser(description="Deploy Llama model to Azure ML endpoint")
+    parser = argparse.ArgumentParser(description="Deploy Llama model to Azure ML endpoint")
     parser.add_argument("--azure_config", type=str, default="config/azure_config.yaml",
                        help="Path to Azure config file")
     parser.add_argument("--deployment_config", type=str, default="config/deployment_config.yaml",
@@ -479,6 +647,9 @@ def main():
         print(f"Model Path: {args.model_path}")
         print(f"Endpoint: {deployment_config['deployment']['endpoint_name']}")
         print(f"Instance Type: {deployment_config['deployment']['instance_type']}")
+        
+        # ADD THIS: Log initial system state
+        log_system_resources()
         
         # Create ML client
         ml_client = get_ml_client(azure_config)

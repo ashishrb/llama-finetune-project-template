@@ -9,6 +9,7 @@ import argparse
 from pathlib import Path
 from typing import Dict, List
 from datetime import datetime
+from src.training.utils import GPUMemoryManager, log_system_resources
 
 # Add project root to path
 sys.path.append(os.path.join(os.path.dirname(__file__), "../.."))
@@ -77,6 +78,10 @@ def setup_model_and_tokenizer(model_config: Dict, training_config: Dict):
     """Initialize model and tokenizer with Unsloth optimizations."""
     print("Setting up model and tokenizer...")
     
+    # ADD THIS: Initialize memory manager
+    memory_manager = GPUMemoryManager()
+    log_system_resources()
+    
     model_name = model_config['model']['base_model']
     max_seq_length = training_config['training']['max_seq_length']
     
@@ -87,14 +92,31 @@ def setup_model_and_tokenizer(model_config: Dict, training_config: Dict):
     print(f"Max sequence length: {max_seq_length}")
     print(f"Using dtype: {dtype}")
     
-    # Load model and tokenizer with Unsloth optimizations
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=model_name,
-        max_seq_length=max_seq_length,
-        dtype=dtype,
-        load_in_4bit=model_config['quantization']['load_in_4bit'],
-        # trust_remote_code=True,  # Uncomment if needed
-    )
+    # ADD THIS: Check memory before model loading
+    try:
+        # Estimate model memory requirement (rough estimate for Llama-2B)
+        estimated_memory_gb = 8.0  # Adjust based on your model size
+        if not memory_manager.check_available_memory(estimated_memory_gb):
+            memory_manager.clear_gpu_cache()
+        
+        # Load model and tokenizer with Unsloth optimizations
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name=model_name,
+            max_seq_length=max_seq_length,
+            dtype=dtype,
+            load_in_4bit=model_config['quantization']['load_in_4bit'],
+            # trust_remote_code=True,  # Uncomment if needed
+        )
+        
+        # ADD THIS: Log memory after model loading
+        memory_manager.log_memory_summary()
+        
+    except RuntimeError as e:
+        if "out of memory" in str(e).lower():
+            print("❌ GPU out of memory during model loading")
+            memory_manager.clear_gpu_cache()
+            raise RuntimeError("GPU out of memory. Try reducing model size or using CPU.")
+        raise e
     
     # Setup tokenizer
     tokenizer.pad_token = tokenizer.eos_token
@@ -127,6 +149,16 @@ def setup_lora_model(model, training_config: Dict):
     print(f"Target modules: {lora_config['target_modules']}")
     
     return model
+
+def monitor_training_memory(memory_manager, step: int, log_interval: int = 100):
+    """Monitor memory during training."""
+    if step % log_interval == 0:
+        memory_manager.monitor_and_cleanup()
+        
+        # Force cleanup every 500 steps
+        if step % 500 == 0:
+            memory_manager.clear_gpu_cache()
+            memory_manager.log_memory_summary()
 
 def setup_training_arguments(training_config: Dict, output_dir: str) -> TrainingArguments:
     """Setup training arguments."""
@@ -194,6 +226,9 @@ def train_model(
     """Train the model using SFTTrainer."""
     print("Setting up trainer...")
     
+    # ADD THIS: Initialize memory manager for training
+    memory_manager = GPUMemoryManager()
+    
     trainer = SFTTrainer(
         model=model,
         tokenizer=tokenizer,
@@ -207,14 +242,54 @@ def train_model(
         args=training_args,
     )
     
+    # ADD THIS: Add memory monitoring callback
+    class MemoryMonitoringCallback:
+        def __init__(self, memory_manager):
+            self.memory_manager = memory_manager
+            self.step_count = 0
+        
+        def on_step_end(self, args, state, control, **kwargs):
+            self.step_count += 1
+            monitor_training_memory(self.memory_manager, self.step_count)
+    
+    trainer.add_callback(MemoryMonitoringCallback(memory_manager))
+    
     print("Starting training...")
-    trainer.train()
+    
+    # ADD THIS: Memory check before training
+    memory_manager.log_memory_summary()
+    
+    try:
+        trainer.train()
+    except RuntimeError as e:
+        if "out of memory" in str(e).lower():
+            print("❌ GPU out of memory during training")
+            memory_manager.clear_gpu_cache()
+            raise RuntimeError("GPU out of memory during training. Try reducing batch size or sequence length.")
+        raise e
+    finally:
+        # ADD THIS: Always cleanup after training
+        memory_manager.clear_gpu_cache()
+        memory_manager.log_memory_summary()
     
     return trainer
 
 def save_model(model, tokenizer, trainer, output_dir: str, config: Dict):
     """Save the trained model and tokenizer."""
     print("Saving model...")
+    
+    memory_manager = GPUMemoryManager()
+    
+    # Check available disk space (rough estimate)
+    import shutil
+    total, used, free = shutil.disk_usage(output_dir)
+    free_gb = free / 1024**3
+    
+    if free_gb < 10:  # Require at least 10GB free space
+        print(f"⚠️  Warning: Low disk space ({free_gb:.1f}GB available)")
+    
+    # Clear memory before saving to prevent issues
+    memory_manager.clear_gpu_cache()
     
     # Save using Unsloth's optimized saving
     model.save_pretrained(f"{output_dir}/final_model")
@@ -231,6 +306,9 @@ def save_model(model, tokenizer, trainer, output_dir: str, config: Dict):
     
     # Log model to MLflow
     try:
+        model.save_pretrained(f"{output_dir}/final_model")
+        tokenizer.save_pretrained(f"{output_dir}/final_model")
+
         mlflow.transformers.log_model(
             transformers_model={"model": model, "tokenizer": tokenizer},
             artifact_path="model",
@@ -243,6 +321,7 @@ def save_model(model, tokenizer, trainer, output_dir: str, config: Dict):
 def main():
     """Main training function."""
     parser = argparse.ArgumentParser(description="Fine-tune Llama model")
+    parser = argparse.ArgumentParser(description="Fine-tune Llama model")
     parser.add_argument("--config", type=str, default="config/training_config.yaml", 
                        help="Path to training config")
     parser.add_argument("--model_config", type=str, default="config/model_config.yaml", 
@@ -254,6 +333,17 @@ def main():
     
     args = parser.parse_args()
     
+    print("="*60)
+    print("🚀 STARTING LLAMA FINE-TUNING")
+    print("="*60)
+
+    # Log initial system state
+    log_system_resources()
+    
+    # Load configurations
+    training_config = load_config(args.config)
+    model_config = load_model_config(args.model_config)
+
     # Load configurations
     training_config = load_config(args.config)
     model_config = load_model_config(args.model_config)

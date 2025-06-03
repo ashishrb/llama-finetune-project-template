@@ -11,6 +11,7 @@ from datetime import datetime
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
+from src.training.utils import GPUMemoryManager, log_system_resources, memory_efficient_model_load
 
 # Add project root to path
 sys.path.append(os.path.join(os.path.dirname(__file__), "../.."))
@@ -43,21 +44,27 @@ class ModelEvaluator:
     """Comprehensive model evaluation for corporate Q&A tasks."""
     
     def __init__(
-        self,
-        model: PreTrainedModel,
-        tokenizer: PreTrainedTokenizer,
-        device: str = "auto"
-    ):
-        self.model = model
-        self.tokenizer = tokenizer
-        self.device = self._setup_device(device)
-        self.model.to(self.device)
-        self.model.eval()
-        
-        # Ensure tokenizer has pad token
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-            self.tokenizer.padding_side = "right"
+            self,
+            model: PreTrainedModel,
+            tokenizer: PreTrainedTokenizer,
+            device: str = "auto"
+        ):
+            self.model = model
+            self.tokenizer = tokenizer
+            self.device = self._setup_device(device)
+            self.model.to(self.device)
+            self.model.eval()
+            
+            # ADD THIS: Initialize memory manager
+            self.memory_manager = GPUMemoryManager()
+            
+            # Ensure tokenizer has pad token
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+                self.tokenizer.padding_side = "right"
+            
+            # ADD THIS: Log initial memory state
+            self.memory_manager.log_memory_summary()
     
     def _setup_device(self, device: str) -> torch.device:
         """Setup device for evaluation."""
@@ -72,15 +79,19 @@ class ModelEvaluator:
         return device
     
     def generate_response(
-        self,
-        prompt: str,
-        max_new_tokens: int = 200,
-        temperature: float = 0.7,
-        top_p: float = 0.9,
-        do_sample: bool = True,
-        num_return_sequences: int = 1
-    ) -> List[str]:
+    self,
+    prompt: str,
+    max_new_tokens: int = 200,
+    temperature: float = 0.7,
+    top_p: float = 0.9,
+    do_sample: bool = True,
+    num_return_sequences: int = 1
+) -> List[str]:
         """Generate response for a given prompt."""
+        
+        # ADD THIS: Monitor memory before generation
+        if not self.memory_manager.check_available_memory(2.0):  # Require 2GB free
+            self.memory_manager.clear_gpu_cache()
         
         # Tokenize input
         inputs = self.tokenizer(
@@ -92,19 +103,27 @@ class ModelEvaluator:
         ).to(self.device)
         
         # Generate
-        with torch.no_grad():
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                do_sample=do_sample,
-                num_return_sequences=num_return_sequences,
-                pad_token_id=self.tokenizer.eos_token_id,
-                eos_token_id=self.tokenizer.eos_token_id,
-                repetition_penalty=1.1,
-                length_penalty=1.0
-            )
+        try:
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    do_sample=do_sample,
+                    num_return_sequences=num_return_sequences,
+                    pad_token_id=self.tokenizer.eos_token_id,
+                    eos_token_id=self.tokenizer.eos_token_id,
+                    repetition_penalty=1.1,
+                    length_penalty=1.0
+                )
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower():
+                logger.error("GPU OOM during generation")
+                self.memory_manager.clear_gpu_cache()
+                # Retry with smaller parameters
+                return self._retry_generation_with_reduced_params(prompt, max_new_tokens // 2)
+            raise e
         
         # Decode responses
         responses = []
@@ -116,16 +135,38 @@ class ModelEvaluator:
         
         return responses
     
+    def _retry_generation_with_reduced_params(self, prompt: str, max_new_tokens: int) -> List[str]:
+        """Retry generation with reduced parameters after OOM."""
+        logger.warning(f"Retrying generation with reduced max_new_tokens: {max_new_tokens}")
+        
+        try:
+            return self.generate_response(
+                prompt=prompt,
+                max_new_tokens=max_new_tokens,
+                temperature=0.7,
+                top_p=0.9,
+                do_sample=True,
+                num_return_sequences=1
+            )
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower():
+                logger.error("Failed even with reduced parameters")
+                return ["Error: Unable to generate response due to memory constraints"]
+            raise e
+
     def evaluate_dataset(
-        self,
-        dataset: Union[CorporateQADataset, List[Dict]],
-        batch_size: int = 8,
-        max_samples: Optional[int] = None,
-        generation_params: Optional[Dict] = None
-    ) -> Dict:
+    self,
+    dataset: Union[CorporateQADataset, List[Dict]],
+    batch_size: int = 8,
+    max_samples: Optional[int] = None,
+    generation_params: Optional[Dict] = None
+) -> Dict:
         """Evaluate model on a dataset."""
         
         logger.info("Starting dataset evaluation...")
+        
+        # ADD THIS: Log initial memory state
+        self.memory_manager.log_memory_summary()
         
         # Default generation parameters
         gen_params = {
@@ -151,9 +192,16 @@ class ModelEvaluator:
         references = []
         prompts = []
         
+        # ADD THIS: Memory-aware batch processing
+        processed_samples = 0
+        
         # Process in batches for memory efficiency
         for i in tqdm(range(0, len(eval_data), batch_size), desc="Evaluating"):
             batch = eval_data[i:i+batch_size]
+            
+            # ADD THIS: Memory monitoring every 10 batches
+            if i % (batch_size * 10) == 0:
+                self.memory_manager.monitor_and_cleanup()
             
             for sample in batch:
                 # Format prompt
@@ -166,12 +214,23 @@ class ModelEvaluator:
                     predictions.append(response)
                     references.append(sample['output'])
                     prompts.append(prompt)
+                    processed_samples += 1
                     
                 except Exception as e:
-                    logger.warning(f"Error generating response for sample: {e}")
+                    logger.warning(f"Error generating response for sample {processed_samples}: {e}")
                     predictions.append("")
                     references.append(sample['output'])
                     prompts.append(prompt)
+                    processed_samples += 1
+            
+            # ADD THIS: Aggressive cleanup every 50 samples
+            if processed_samples % 50 == 0:
+                self.memory_manager.clear_gpu_cache()
+                logger.info(f"Processed {processed_samples}/{len(eval_data)} samples")
+        
+        # ADD THIS: Final memory cleanup and summary
+        self.memory_manager.clear_gpu_cache()
+        self.memory_manager.log_memory_summary()
         
         # Calculate metrics
         logger.info("Calculating evaluation metrics...")
@@ -371,50 +430,78 @@ def load_model_for_evaluation(
     
     logger.info(f"Loading model from {model_path}")
     
+    # ADD THIS: Initialize memory manager and log system state
+    memory_manager = GPUMemoryManager()
+    log_system_resources()
+    
     # Check if it's a LoRA adapter
     adapter_config_path = Path(model_path) / "adapter_config.json"
     is_lora_adapter = adapter_config_path.exists()
     
-    if is_lora_adapter:
-        # Load LoRA adapter
-        if not base_model_name:
-            # Try to read base model from adapter config
-            try:
-                with open(adapter_config_path, 'r') as f:
-                    adapter_config = json.load(f)
-                base_model_name = adapter_config.get('base_model_name_or_path', 'unsloth/llama-3.2-2b-instruct')
-            except:
-                base_model_name = 'unsloth/llama-3.2-2b-instruct'
-        
-        logger.info(f"Loading base model: {base_model_name}")
-        base_model = AutoModelForCausalLM.from_pretrained(
-            base_model_name,
-            torch_dtype=torch.float16,
-            device_map="auto" if device == "auto" else None,
-            trust_remote_code=True
-        )
-        
-        logger.info(f"Loading LoRA adapter from: {model_path}")
-        model = PeftModel.from_pretrained(base_model, model_path)
-        
-        # Load tokenizer
-        tokenizer = AutoTokenizer.from_pretrained(model_path)
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-    else:
-        # Load full model
-        model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            torch_dtype=torch.float16,
-            device_map="auto" if device == "auto" else None,
-            trust_remote_code=True
-        )
-        
-        tokenizer = AutoTokenizer.from_pretrained(model_path)
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
+    # ADD THIS: Estimate memory requirements
+    estimated_memory_gb = 12.0 if is_lora_adapter else 8.0  # LoRA needs base model + adapter
     
-    logger.info("Model and tokenizer loaded successfully")
+    if not memory_manager.check_available_memory(estimated_memory_gb):
+        memory_manager.clear_gpu_cache()
+        if not memory_manager.check_available_memory(estimated_memory_gb):
+            raise RuntimeError(f"Insufficient GPU memory for evaluation (need {estimated_memory_gb}GB)")
+    
+    try:
+        if is_lora_adapter:
+            # Load LoRA adapter
+            if not base_model_name:
+                # Try to read base model from adapter config
+                try:
+                    with open(adapter_config_path, 'r') as f:
+                        adapter_config = json.load(f)
+                    base_model_name = adapter_config.get('base_model_name_or_path', 'unsloth/llama-3.2-2b-instruct')
+                except:
+                    base_model_name = 'unsloth/llama-3.2-2b-instruct'
+            
+            logger.info(f"Loading base model: {base_model_name}")
+            
+            # ADD THIS: Memory monitoring during base model loading
+            memory_manager.log_memory_summary()
+            
+            base_model = AutoModelForCausalLM.from_pretrained(
+                base_model_name,
+                torch_dtype=torch.float16,
+                device_map="auto" if device == "auto" else None,
+                trust_remote_code=True
+            )
+            
+            logger.info(f"Loading LoRA adapter from: {model_path}")
+            model = PeftModel.from_pretrained(base_model, model_path)
+            
+            # Load tokenizer
+            tokenizer = AutoTokenizer.from_pretrained(model_path)
+            if tokenizer.pad_token is None:
+                tokenizer.pad_token = tokenizer.eos_token
+                
+        else:
+            # Load full model
+            model = AutoModelForCausalLM.from_pretrained(
+                model_path,
+                torch_dtype=torch.float16,
+                device_map="auto" if device == "auto" else None,
+                trust_remote_code=True
+            )
+            
+            tokenizer = AutoTokenizer.from_pretrained(model_path)
+            if tokenizer.pad_token is None:
+                tokenizer.pad_token = tokenizer.eos_token
+        
+        # ADD THIS: Log memory after successful loading
+        memory_manager.log_memory_summary()
+        logger.info("Model and tokenizer loaded successfully")
+        
+    except RuntimeError as e:
+        if "out of memory" in str(e).lower():
+            logger.error("GPU out of memory during model loading")
+            memory_manager.clear_gpu_cache()
+            raise RuntimeError("GPU OOM during model loading. Try using CPU or smaller model.")
+        raise e
+    
     return model, tokenizer
 
 
@@ -429,41 +516,70 @@ def run_comprehensive_evaluation(
 ) -> Dict:
     """Run comprehensive evaluation pipeline."""
     
-    # Create output directory
+    # CREATE OUTPUT DIRECTORY
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     
-    # Load model
-    model, tokenizer = load_model_for_evaluation(model_path, base_model_name)
-    evaluator = ModelEvaluator(model, tokenizer)
+    # Initialize memory manager and log system state
+    memory_manager = GPUMemoryManager()
+    log_system_resources()
     
-    # Load test data
-    if test_data_path.endswith('.jsonl'):
-        test_data = load_jsonl_data(test_data_path)
-    else:
-        raise ValueError("Only JSONL format supported for test data")
+    # Adjust batch size based on available memory
+    memory_info = memory_manager.get_gpu_memory_info()
+    if memory_info['total_gb'] < 16:  # Less than 16GB GPU
+        batch_size = min(batch_size, 4)
+        logger.info(f"Reduced batch size to {batch_size} due to limited GPU memory")
     
-    logger.info(f"Loaded {len(test_data)} test samples")
+    try:
+        # Load model
+        model, tokenizer = load_model_for_evaluation(model_path, base_model_name)
+        evaluator = ModelEvaluator(model, tokenizer)
+        
+        # Load test data
+        if test_data_path.endswith('.jsonl'):
+            test_data = load_jsonl_data(test_data_path)
+        else:
+            raise ValueError("Only JSONL format supported for test data")
+        
+        logger.info(f"Loaded {len(test_data)} test samples")
+        
+        # Limit samples based on memory if not specified
+        if max_samples is None and memory_info['total_gb'] < 12:
+            max_samples = min(len(test_data), 100)  # Limit to 100 for small GPUs
+            logger.info(f"Limited evaluation to {max_samples} samples due to memory constraints")
+        
+        # Run evaluation
+        logger.info("Starting comprehensive evaluation...")
+        results = evaluator.evaluate_dataset(
+            test_data,
+            batch_size=batch_size,
+            max_samples=max_samples,
+            generation_params=generation_params
+        )
+        
+        # Add metadata
+        results['evaluation_metadata'] = {
+            'model_path': model_path,
+            'test_data_path': test_data_path,
+            'timestamp': datetime.now().isoformat(),
+            'num_test_samples': len(test_data),
+            'max_samples_evaluated': max_samples or len(test_data),
+            'generation_params': generation_params or {},
+            'gpu_memory_used_gb': memory_manager.get_gpu_memory_info()['allocated_gb'],
+            'peak_memory_gb': memory_manager.peak_memory
+        }
+        
+    except Exception as e:
+        logger.error(f"Evaluation failed: {e}")
+        memory_manager.clear_gpu_cache()
+        raise e
     
-    # Run evaluation
-    logger.info("Starting comprehensive evaluation...")
-    results = evaluator.evaluate_dataset(
-        test_data,
-        batch_size=batch_size,
-        max_samples=max_samples,
-        generation_params=generation_params
-    )
+    finally:
+        # Always cleanup memory at the end
+        memory_manager.clear_gpu_cache()
+        memory_manager.log_memory_summary()
     
-    # Add metadata
-    results['evaluation_metadata'] = {
-        'model_path': model_path,
-        'test_data_path': test_data_path,
-        'timestamp': datetime.now().isoformat(),
-        'num_test_samples': len(test_data),
-        'max_samples_evaluated': max_samples or len(test_data),
-        'generation_params': generation_params or {}
-    }
-    
+    # ⚠️  IMPORTANT: These lines should be OUTSIDE the try/except/finally block
     # Save results
     results_file = output_path / "evaluation_results.json"
     with open(results_file, 'w') as f:
@@ -479,6 +595,10 @@ def run_comprehensive_evaluation(
         log_evaluation_to_mlflow(results, model_path)
     except Exception as e:
         logger.warning(f"Could not log to MLflow: {e}")
+    
+    # Log final memory summary
+    final_memory = memory_manager.get_gpu_memory_info()
+    logger.info(f"Evaluation completed. Final GPU memory: {final_memory['allocated_gb']:.2f}GB")
     
     return results
 

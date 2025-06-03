@@ -5,8 +5,89 @@ from torch.utils.data import Dataset
 from typing import Dict, List, Optional, Union
 from transformers import PreTrainedTokenizer
 import logging
+import weakref
+from collections import OrderedDict
 
 logger = logging.getLogger(__name__)
+
+class LimitedCache:
+    """
+    Memory-aware cache with size limits and automatic cleanup.
+    Uses OrderedDict for LRU (Least Recently Used) eviction.
+    """
+    
+    def __init__(self, max_size: int = 1000, memory_limit_mb: int = 2048):
+        self.max_size = max_size
+        self.memory_limit_mb = memory_limit_mb
+        self.cache = OrderedDict()
+        self._memory_usage_mb = 0
+        
+    def __contains__(self, key):
+        return key in self.cache
+    
+    def __getitem__(self, key):
+        if key in self.cache:
+            # Move to end (mark as recently used)
+            value = self.cache.pop(key)
+            self.cache[key] = value
+            return value
+        raise KeyError(key)
+    
+    def __setitem__(self, key, value):
+        # Remove old value if exists
+        if key in self.cache:
+            old_value = self.cache.pop(key)
+            self._memory_usage_mb -= self._estimate_size_mb(old_value)
+        
+        # Add new value
+        self.cache[key] = value
+        self._memory_usage_mb += self._estimate_size_mb(value)
+        
+        # Cleanup if necessary
+        self._cleanup_if_needed()
+    
+    def _estimate_size_mb(self, value) -> float:
+        """Estimate memory usage of cached value in MB."""
+        try:
+            if isinstance(value, dict):
+                size_bytes = 0
+                for k, v in value.items():
+                    if hasattr(v, 'numel'):  # PyTorch tensor
+                        size_bytes += v.numel() * v.element_size()
+                    else:
+                        size_bytes += len(str(v).encode('utf-8'))
+                return size_bytes / (1024 * 1024)  # Convert to MB
+            return 0.1  # Default estimate
+        except:
+            return 0.1
+    
+    def _cleanup_if_needed(self):
+        """Remove old entries if cache exceeds limits."""
+        # Remove oldest entries if over size limit
+        while len(self.cache) > self.max_size:
+            oldest_key = next(iter(self.cache))
+            oldest_value = self.cache.pop(oldest_key)
+            self._memory_usage_mb -= self._estimate_size_mb(oldest_value)
+        
+        # Remove oldest entries if over memory limit
+        while self._memory_usage_mb > self.memory_limit_mb and self.cache:
+            oldest_key = next(iter(self.cache))
+            oldest_value = self.cache.pop(oldest_key)
+            self._memory_usage_mb -= self._estimate_size_mb(oldest_value)
+    
+    def clear(self):
+        """Clear all cached items."""
+        self.cache.clear()
+        self._memory_usage_mb = 0
+    
+    def get_stats(self) -> dict:
+        """Get cache statistics."""
+        return {
+            'size': len(self.cache),
+            'max_size': self.max_size,
+            'memory_usage_mb': self._memory_usage_mb,
+            'memory_limit_mb': self.memory_limit_mb
+        }
 
 class CorporateQADataset(Dataset):
     """
@@ -52,8 +133,10 @@ class CorporateQADataset(Dataset):
         # Load and validate data
         self.data = self._load_data()
         
-        # Cache for tokenized data
-        self._tokenized_cache = {} if cache_tokenization else None
+        # Cache for tokenized data with size limit
+        self._tokenized_cache = LimitedCache(max_size=1000) if cache_tokenization else None
+        self._cache_hits = 0
+        self._cache_misses = 0
         
         logger.info(f"Loaded {len(self.data)} samples from {data_path}")
     
@@ -152,7 +235,10 @@ class CorporateQADataset(Dataset):
         
         # Check cache first
         if self._tokenized_cache is not None and idx in self._tokenized_cache:
+            self._cache_hits += 1
             return self._tokenized_cache[idx]
+        
+        self._cache_misses += 1
         
         # Get raw sample
         sample = self.data[idx]
@@ -167,10 +253,20 @@ class CorporateQADataset(Dataset):
         tokenized["text"] = formatted_text
         tokenized["original_sample"] = sample
         
-        # Cache if enabled
+        # Cache if enabled with memory monitoring
         if self._tokenized_cache is not None:
-            self._tokenized_cache[idx] = tokenized
-        
+            try:
+                self._tokenized_cache[idx] = tokenized
+                
+                # Log cache stats periodically
+                if (self._cache_hits + self._cache_misses) % 100 == 0:
+                    self._log_cache_stats()
+                    
+            except Exception as e:
+                logger.warning(f"Failed to cache sample {idx}: {e}")
+                # Continue without caching
+                pass
+
         return tokenized
     
     def get_sample_text(self, idx: int) -> str:
@@ -182,11 +278,64 @@ class CorporateQADataset(Dataset):
         """Get the raw sample data."""
         return self.data[idx]
     
+    # def clear_cache(self):
+    #     """Clear the tokenization cache to free memory."""
+    #     if self._tokenized_cache is not None:
+    #         self._tokenized_cache.clear()
+    #         logger.info("Cleared tokenization cache")
+    
+    def _log_cache_stats(self):
+        """Log cache statistics."""
+        if self._tokenized_cache is not None:
+            stats = self._tokenized_cache.get_stats()
+            hit_rate = self._cache_hits / (self._cache_hits + self._cache_misses) if (self._cache_hits + self._cache_misses) > 0 else 0
+            
+            logger.info(f"Cache stats - Size: {stats['size']}/{stats['max_size']}, "
+                    f"Memory: {stats['memory_usage_mb']:.1f}/{stats['memory_limit_mb']}MB, "
+                    f"Hit rate: {hit_rate:.2%}")
+
+    def get_cache_info(self) -> dict:
+        """Get detailed cache information."""
+        if self._tokenized_cache is None:
+            return {'caching_enabled': False}
+        
+        stats = self._tokenized_cache.get_stats()
+        hit_rate = self._cache_hits / (self._cache_hits + self._cache_misses) if (self._cache_hits + self._cache_misses) > 0 else 0
+        
+        return {
+            'caching_enabled': True,
+            'cache_size': stats['size'],
+            'max_cache_size': stats['max_size'],
+            'memory_usage_mb': stats['memory_usage_mb'],
+            'memory_limit_mb': stats['memory_limit_mb'],
+            'cache_hits': self._cache_hits,
+            'cache_misses': self._cache_misses,
+            'hit_rate': hit_rate
+        }
+
+    def optimize_cache(self):
+        """Optimize cache by removing least recently used items."""
+        if self._tokenized_cache is not None:
+            old_size = len(self._tokenized_cache.cache)
+            
+            # Force cleanup to half the current size
+            target_size = max(100, old_size // 2)
+            while len(self._tokenized_cache.cache) > target_size:
+                oldest_key = next(iter(self._tokenized_cache.cache))
+                oldest_value = self._tokenized_cache.cache.pop(oldest_key)
+                self._tokenized_cache._memory_usage_mb -= self._tokenized_cache._estimate_size_mb(oldest_value)
+            
+            new_size = len(self._tokenized_cache.cache)
+            logger.info(f"Cache optimized: {old_size} -> {new_size} items")
+
     def clear_cache(self):
         """Clear the tokenization cache to free memory."""
         if self._tokenized_cache is not None:
+            old_stats = self._tokenized_cache.get_stats()
             self._tokenized_cache.clear()
-            logger.info("Cleared tokenization cache")
+            self._cache_hits = 0
+            self._cache_misses = 0
+            logger.info(f"Cleared tokenization cache (freed {old_stats['memory_usage_mb']:.1f}MB)")
 
 
 class DataCollator:
@@ -194,12 +343,20 @@ class DataCollator:
     Custom data collator for batching tokenized samples with proper padding.
     """
     
-    def __init__(self, tokenizer: PreTrainedTokenizer, padding: bool = True):
+    def __init__(self, tokenizer: PreTrainedTokenizer, padding: bool = True, max_batch_memory_mb: float = 512):
         self.tokenizer = tokenizer
         self.padding = padding
+        self.max_batch_memory_mb = max_batch_memory_mb
+        self._batch_count = 0
     
     def __call__(self, features: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
         """Collate features into a batch."""
+        self._batch_count += 1
+        
+        # Monitor memory usage every 50 batches
+        if self._batch_count % 50 == 0:
+            self._check_memory_usage(features)
+        
         # Extract tensors
         input_ids = [f["input_ids"] for f in features]
         attention_masks = [f["attention_mask"] for f in features]
@@ -220,6 +377,19 @@ class DataCollator:
             "attention_mask": attention_masks,
             "labels": labels
         }
+    
+    def _check_memory_usage(self, features: List[Dict[str, torch.Tensor]]):
+        """Check memory usage of current batch."""
+        try:
+            # Estimate batch memory usage
+            total_elements = sum(f["input_ids"].numel() for f in features)
+            estimated_mb = (total_elements * 4) / (1024 * 1024)  # 4 bytes per float32
+            
+            if estimated_mb > self.max_batch_memory_mb:
+                logger.warning(f"Large batch detected: {estimated_mb:.1f}MB (limit: {self.max_batch_memory_mb}MB)")
+                
+        except Exception as e:
+            logger.debug(f"Could not estimate batch memory: {e}")
     
     def _pad_sequences(self, sequences: List[torch.Tensor], pad_value: int) -> torch.Tensor:
         """Pad sequences to the same length."""

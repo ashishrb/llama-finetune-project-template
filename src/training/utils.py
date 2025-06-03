@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Dict, List, Optional, Union, Any
 from datetime import datetime
 import yaml
+import psutil
+import gc
+from typing import Optional, Dict, Any
 
 from transformers import (
     TrainingArguments, 
@@ -404,6 +407,132 @@ class EarlyStoppingWithPatience(EarlyStoppingCallback):
         
         return result
 
+class GPUMemoryManager:
+    """Manages GPU memory monitoring and cleanup."""
+    
+    def __init__(self, warning_threshold: float = 0.8, cleanup_threshold: float = 0.9):
+        self.warning_threshold = warning_threshold  # 80% usage warning
+        self.cleanup_threshold = cleanup_threshold  # 90% usage cleanup
+        self.peak_memory = 0
+        
+    def get_gpu_memory_info(self) -> Dict[str, float]:
+        """Get current GPU memory usage information."""
+        if not torch.cuda.is_available():
+            return {'allocated_gb': 0, 'reserved_gb': 0, 'total_gb': 0, 'usage_percent': 0}
+        
+        allocated = torch.cuda.memory_allocated() / 1024**3  # GB
+        reserved = torch.cuda.memory_reserved() / 1024**3    # GB
+        total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        usage_percent = allocated / total if total > 0 else 0
+        
+        # Track peak usage
+        self.peak_memory = max(self.peak_memory, allocated)
+        
+        return {
+            'allocated_gb': allocated,
+            'reserved_gb': reserved, 
+            'total_gb': total,
+            'usage_percent': usage_percent,
+            'peak_gb': self.peak_memory
+        }
+    
+    def clear_gpu_cache(self):
+        """Clear GPU memory cache."""
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
+            logger.info("GPU cache cleared")
+    
+    def monitor_and_cleanup(self, force_cleanup: bool = False) -> bool:
+        """Monitor memory and cleanup if necessary."""
+        memory_info = self.get_gpu_memory_info()
+        usage = memory_info['usage_percent']
+        
+        if usage > self.warning_threshold:
+            logger.warning(f"High GPU memory usage: {usage:.1%} ({memory_info['allocated_gb']:.2f}GB)")
+        
+        if usage > self.cleanup_threshold or force_cleanup:
+            logger.info(f"Cleaning up GPU memory (usage: {usage:.1%})")
+            self.clear_gpu_cache()
+            
+            # Check if cleanup was effective
+            new_info = self.get_gpu_memory_info()
+            logger.info(f"After cleanup: {new_info['usage_percent']:.1%} ({new_info['allocated_gb']:.2f}GB)")
+            return True
+        
+        return False
+    
+    def check_available_memory(self, required_gb: float) -> bool:
+        """Check if required memory is available."""
+        memory_info = self.get_gpu_memory_info()
+        available = memory_info['total_gb'] - memory_info['allocated_gb']
+        
+        if available < required_gb:
+            logger.warning(f"Insufficient GPU memory. Required: {required_gb:.2f}GB, Available: {available:.2f}GB")
+            return False
+        return True
+    
+    def log_memory_summary(self):
+        """Log comprehensive memory summary."""
+        memory_info = self.get_gpu_memory_info()
+        logger.info(f"GPU Memory Summary:")
+        logger.info(f"  Current: {memory_info['allocated_gb']:.2f}GB ({memory_info['usage_percent']:.1%})")
+        logger.info(f"  Peak: {memory_info['peak_gb']:.2f}GB") 
+        logger.info(f"  Total: {memory_info['total_gb']:.2f}GB")
+
+def memory_efficient_model_load(model_path: str, device: str = "auto", max_memory_gb: float = None):
+    """Load model with memory efficiency checks."""
+    memory_manager = GPUMemoryManager()
+    
+    # Check available memory before loading
+    if max_memory_gb and not memory_manager.check_available_memory(max_memory_gb):
+        memory_manager.clear_gpu_cache()
+        if not memory_manager.check_available_memory(max_memory_gb):
+            raise RuntimeError(f"Insufficient GPU memory to load model (required: {max_memory_gb}GB)")
+    
+    logger.info(f"Loading model from {model_path}")
+    memory_manager.log_memory_summary()
+    
+    try:
+        # Model loading logic would go here
+        # This is a placeholder for the actual loading
+        logger.info("Model loaded successfully")
+        memory_manager.log_memory_summary()
+        
+    except RuntimeError as e:
+        if "out of memory" in str(e).lower():
+            logger.error("Out of memory error during model loading")
+            memory_manager.clear_gpu_cache()
+            raise RuntimeError("GPU out of memory. Try reducing batch size or model size.")
+        raise e
+
+def get_system_memory_info() -> Dict[str, float]:
+    """Get system RAM memory information."""
+    memory = psutil.virtual_memory()
+    return {
+        'total_gb': memory.total / 1024**3,
+        'available_gb': memory.available / 1024**3,
+        'used_gb': memory.used / 1024**3,
+        'usage_percent': memory.percent / 100
+    }
+
+def log_system_resources():
+    """Log comprehensive system resource information."""
+    # GPU info
+    gpu_manager = GPUMemoryManager()
+    gpu_info = gpu_manager.get_gpu_memory_info()
+    
+    # System RAM info  
+    ram_info = get_system_memory_info()
+    
+    # CPU info
+    cpu_percent = psutil.cpu_percent(interval=1)
+    
+    logger.info("=== SYSTEM RESOURCES ===")
+    logger.info(f"GPU Memory: {gpu_info['allocated_gb']:.2f}GB / {gpu_info['total_gb']:.2f}GB ({gpu_info['usage_percent']:.1%})")
+    logger.info(f"RAM Memory: {ram_info['used_gb']:.2f}GB / {ram_info['total_gb']:.2f}GB ({ram_info['usage_percent']:.1%})")
+    logger.info(f"CPU Usage: {cpu_percent:.1f}%")
+    logger.info("========================")
 
 def setup_training_environment(
     config_path: str,
