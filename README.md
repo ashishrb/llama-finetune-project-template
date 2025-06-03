@@ -1,2 +1,0 @@
-# llama-finetune-project-template
-
