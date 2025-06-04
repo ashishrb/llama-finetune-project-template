@@ -79,32 +79,49 @@ def validate_prerequisites(ml_client: MLClient, config: dict) -> bool:
     
     return True
 
+# def upload_data_to_datastore(ml_client: MLClient, local_data_path: str = "data/processed") -> str:
+#     """Upload processed data to Azure ML datastore."""
+#     print("📤 Uploading data to Azure ML datastore...")
+    
+#     # Create a unique path for this run
+#     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+#     remote_path = f"llama_training_data/{timestamp}"
+    
+#     try:
+#         # Upload data folder
+#         data_asset = ml_client.data.create_or_update({  
+#             "name": f"llama-training-data-{timestamp}",
+#             "description": "Processed training data for Llama fine-tuning",
+#             "type": AssetTypes.URI_FOLDER,
+#             "path": local_data_path
+#         })
+        
+#         print(f"✅ Data uploaded successfully")
+#         print(f"   Version: {data_asset.version}")      
+        
+        
+#     except Exception as e:
+#         print(f"❌ Failed to upload data: {e}")
+#         raise e
+
 def upload_data_to_datastore(ml_client: MLClient, local_data_path: str = "data/processed") -> str:
-    """Upload processed data to Azure ML datastore."""
-    print("📤 Uploading data to Azure ML datastore...")
+    """Use local data path directly (simpler approach)."""
+    print("📁 Using local data path for training...")
     
-    # Create a unique path for this run
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    remote_path = f"llama_training_data/{timestamp}"
+    import os
     
-    try:
-        # Upload data folder
-        data_asset = ml_client.data.create_or_update({
-            "name": f"llama-training-data-{timestamp}",
-            "description": "Processed training data for Llama fine-tuning",
-            "type": AssetTypes.URI_FOLDER,
-            "path": local_data_path
-        })
-        
-        print(f"✅ Data uploaded successfully")
-        print(f"   Asset name: {data_asset.name}")
-        print(f"   Version: {data_asset.version}")
-        
-        return f"azureml:{data_asset.name}:{data_asset.version}"
-        
-    except Exception as e:
-        print(f"❌ Failed to upload data: {e}")
-        raise e
+    # Check if data exists locally
+    abs_path = os.path.abspath(local_data_path)
+    
+    if not os.path.exists(abs_path):
+        raise FileNotFoundError(f"Data path not found: {abs_path}")
+    
+    # List data files for verification
+    data_files = [f for f in os.listdir(abs_path) if f.endswith('.jsonl')]
+    print(f"✅ Found data files: {data_files}")
+    print(f"   Using path: {abs_path}")
+    
+    return abs_path
 
 def create_training_job(
     ml_client: MLClient, 
@@ -121,8 +138,13 @@ def create_training_job(
     
     print(f"📋 Creating training job: {job_name}")
     
+    # Import required classes
+    from azure.ai.ml import command
+    from azure.ai.ml import Input, Output
+    from azure.ai.ml.constants import AssetTypes, InputOutputModes
+    
     # Define the command to run
-    command = """
+    command_str = """
 python src/training/train.py \
     --config config/training_config.yaml \
     --model_config config/model_config.yaml \
@@ -130,9 +152,9 @@ python src/training/train.py \
     --output_dir ${{outputs.model}}
 """
     
-    # Create the job
-    job = CommandJob(
-        # Job identification
+    # Create the job using the command function
+    job = command(
+        name=job_name,
         display_name=job_name,
         description="Fine-tune Llama-3.2-2B on corporate Q&A dataset using Unsloth",
         experiment_name=azure_config.get('experiment', {}).get('name', 'llama-finetune'),
@@ -143,7 +165,7 @@ python src/training/train.py \
         
         # Code and command
         code="./",  # Upload current directory
-        command=command,
+        command=command_str,
         
         # Inputs and outputs
         inputs={

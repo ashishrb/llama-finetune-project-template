@@ -117,7 +117,7 @@ def test_model_loading():
         from transformers import AutoConfig, AutoTokenizer
         
         # Test loading model config (lightweight)
-        model_name = "gpt2"  # Use small model for testing
+        model_name = "Unsloth/llama-3.2-3B-Instruct"  # Use small model for testing
         
         config = AutoConfig.from_pretrained(model_name)
         print(f"   Model type: {config.model_type}")

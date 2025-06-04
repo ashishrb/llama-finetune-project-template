@@ -13,10 +13,10 @@ compute:
   idle_seconds_before_scaledown: 300
   
 environment:
-  name: "llama-finetune-env"
-  conda_file: "environment.yaml"
-  docker:
-    base_image: "mcr.microsoft.com/azureml/openmpi4.1.0-cuda11.8-cudnn8-ubuntu20.04"
+  name: "AzureML-pytorch-1.13-py38-cuda11.7-ubuntu20.04"
+  #conda_file: "environment.yaml"  
+  #docker:
+    #base_image: "mcr.microsoft.com/azureml/curated/pytorch-2.0-py38-cuda11.8-ubuntu20.04:latest"
 
 experiment:
   name: "llama-3.2-2b-finetune"

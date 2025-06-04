@@ -89,8 +89,8 @@ def create_or_get_compute_cluster(ml_client: MLClient, config: dict) -> AmlCompu
             compute_cluster = ml_client.compute.begin_create_or_update(compute_cluster).result()
             print(f"✅ Successfully created compute cluster: {cluster_name}")
             print(f"   VM Size: {compute_cluster.size}")
-            print(f"   Min nodes: {compute_cluster.scale_settings.min_node_count}")
-            print(f"   Max nodes: {compute_cluster.scale_settings.max_node_count}")
+            print(f"   Min nodes: {compute_cluster.min_instances}")  
+            print(f"   Max nodes: {compute_cluster.max_instances}")  
             
             return compute_cluster
             
@@ -125,24 +125,30 @@ def create_or_get_environment(ml_client: MLClient, config: dict) -> Environment:
         return environment
         
     except ResourceNotFoundError:
-        print(f"📝 Creating new environment: {env_name}")
-        
-        # Create environment from conda file
-        environment = Environment(
-            name=env_name,
-            description="Environment for Llama fine-tuning with Unsloth",
-            conda_file="environment.yaml",
-            image=env_config['docker']['base_image'],
-        )
-        
-        try:
-            environment = ml_client.environments.create_or_update(environment)
-            print(f"✅ Successfully created environment: {env_name}")
-            return environment
+        # Check if it's a curated environment (starts with "AzureML-")
+        if env_name.startswith("AzureML-"):
+            print(f"✅ Using curated environment: {env_name}")
+            # Curated environments don't need to be created
+            return env_name
+        else:
+            print(f"📝 Creating new environment: {env_name}")
             
-        except Exception as e:
-            print(f"❌ Failed to create environment: {e}")
-            raise e
+            # Create custom environment with working base image
+            environment = Environment(
+                name=env_name,
+                description="Environment for Llama fine-tuning with Unsloth",
+                conda_file="environment.yaml",
+                image="mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu20.04:latest",  # Guaranteed working image
+            )
+            
+            try:
+                environment = ml_client.environments.create_or_update(environment)
+                print(f"✅ Successfully created environment: {env_name}")
+                return environment
+                
+            except Exception as e:
+                print(f"❌ Failed to create environment: {e}")
+                raise e
 
 def validate_h100_availability(ml_client: MLClient, config: dict):
     """Validate H100 VM availability in the region."""
@@ -194,7 +200,13 @@ def print_setup_summary(config: dict, compute_cluster, environment):
     print(f"Resource Group: {config['azure']['resource_group']}")
     print(f"Workspace: {config['azure']['workspace_name']}")
     print(f"Compute Cluster: {compute_cluster.name} ({compute_cluster.size})")
-    print(f"Environment: {environment.name}")
+    
+    # Fix this line:
+    if hasattr(environment, 'name'):
+        print(f"Environment: {environment.name}")
+    else:
+        print(f"Environment: {environment}")  # For curated environments (string)
+    
     print("\n📋 Next Steps:")
     print("1. Run data preprocessing: python data/data_preprocessing.py")
     print("2. Submit training job: python scripts/submit_training.py")
