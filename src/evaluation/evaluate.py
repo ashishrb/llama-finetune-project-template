@@ -14,7 +14,7 @@ from tqdm import tqdm
 from src.training.utils import GPUMemoryManager, log_system_resources, memory_efficient_model_load
 
 # Add project root to path
-sys.path.append(os.path.join(os.path.dirname(__file__), "../.."))
+#sys.path.append(os.path.join(os.path.dirname(__file__), "../.."))
 
 from transformers import (
     AutoTokenizer, 

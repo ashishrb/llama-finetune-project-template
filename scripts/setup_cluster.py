@@ -131,19 +131,21 @@ def create_or_get_environment(ml_client: MLClient, config: dict) -> Environment:
             # Curated environments don't need to be created
             return env_name
         else:
-            print(f"📝 Creating new environment: {env_name}")
+            print(f"📝 Creating new custom environment: {env_name}")
             
-            # Create custom environment with working base image
+            # Create custom environment
             environment = Environment(
                 name=env_name,
-                description="Environment for Llama fine-tuning with Unsloth",
+                description="Custom environment for Llama fine-tuning with Unsloth + CUDA 12.x",
                 conda_file="environment.yaml",
-                image="mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu20.04:latest",  # Guaranteed working image
+                image="mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu22.04:latest"
             )
             
             try:
                 environment = ml_client.environments.create_or_update(environment)
-                print(f"✅ Successfully created environment: {env_name}")
+                print(f"✅ Environment creation started: {env_name}")
+                print("⏳ Environment build will take 15-20 minutes...")
+                print("💡 Monitor build progress in Azure ML Studio > Environments")
                 return environment
                 
             except Exception as e:
@@ -191,6 +193,52 @@ def check_quotas(ml_client: MLClient, config: dict):
     
     print(f"   💡 Check quota in Azure Portal > Subscriptions > Usage + quotas")
 
+def list_available_pytorch_environments(ml_client: MLClient):
+    """List all available PyTorch curated environments."""
+    print("🔍 Checking available PyTorch environments...")
+    
+    try:
+        # Get all environments from the azureml registry
+        environments = ml_client.environments.list(list_view_type="All")
+        
+        pytorch_envs = []
+        all_envs = []
+        
+        for env in environments:
+            env_name = env.name
+            all_envs.append(env_name)
+            
+            # Filter for PyTorch environments
+            if any(keyword in env_name.lower() for keyword in ['pytorch', 'acpt', 'torch']):
+                pytorch_envs.append(env_name)
+        
+        print(f"\n🔥 Found {len(pytorch_envs)} PyTorch environments:")
+        for env in sorted(pytorch_envs):
+            print(f"   - {env}")
+        
+        print(f"\n📋 Total environments available: {len(all_envs)}")
+        print("   (Use --list-all to see all environments)")
+        
+        return pytorch_envs
+        
+    except Exception as e:
+        print(f"❌ Error listing environments: {e}")
+        return []
+
+def list_all_environments(ml_client: MLClient):
+    """List ALL available environments."""
+    try:
+        environments = ml_client.environments.list(list_view_type="All")
+        
+        print("📋 ALL AVAILABLE ENVIRONMENTS:")
+        print("="*60)
+        
+        for env in sorted(environments, key=lambda x: x.name):
+            print(f"   - {env.name}")
+        
+    except Exception as e:
+        print(f"❌ Error listing all environments: {e}")
+
 def print_setup_summary(config: dict, compute_cluster, environment):
     """Print setup summary."""
     print("\n" + "="*60)
@@ -215,12 +263,14 @@ def print_setup_summary(config: dict, compute_cluster, environment):
 def main():
     """Main setup function."""
     parser = argparse.ArgumentParser(description="Setup Azure ML cluster and environment")
-    parser.add_argument("--config", type=str, default="config/azure_config.yaml",
-                       help="Path to Azure config file")
+    parser.add_argument("--config", type=str, default="config/azure_config.yaml")
+    parser.add_argument("--list-pytorch", action="store_true", 
+                       help="List available PyTorch environments")
+    parser.add_argument("--list-all", action="store_true",
+                       help="List ALL available environments")
+    parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--force-recreate", action="store_true",
-                       help="Force recreation of compute cluster")
-    parser.add_argument("--validate-only", action="store_true",
-                       help="Only validate setup without creating resources")
+                       help="Force recreation of environment")
     
     args = parser.parse_args()
     
@@ -228,6 +278,15 @@ def main():
         # Load configuration
         print("📋 Loading Azure configuration...")
         config = load_azure_config(args.config)
+        ml_client = get_ml_client(config)
+
+        if args.list_pytorch:
+            list_available_pytorch_environments(ml_client)
+            return True
+            
+        if args.list_all:
+            list_all_environments(ml_client)
+            return True
         
         print("="*60)
         print("🚀 AZURE ML CLUSTER SETUP")
@@ -255,7 +314,7 @@ def main():
             print("\n✅ Validation completed. Use --force-recreate to create resources.")
             return True
         
-        # Create or get compute cluster
+        #Create or get compute cluster
         if args.force_recreate:
             # Delete existing cluster if it exists
             try:

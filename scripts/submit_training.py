@@ -25,6 +25,16 @@ def load_training_config(config_path: str = "config/training_config.yaml") -> di
 
 def get_ml_client(config: dict) -> MLClient:
     """Create Azure ML client."""
+    #credential = DefaultAzureCredential()
+
+    # Validate Azure configuration
+    azure_config = config['azure']
+    required_fields = ['subscription_id', 'resource_group', 'workspace_name']
+    
+    for field in required_fields:
+        if not azure_config.get(field):
+            raise ValueError(f"Missing required Azure config: {field}")
+    
     credential = DefaultAzureCredential()
     
     ml_client = MLClient(
@@ -105,23 +115,49 @@ def validate_prerequisites(ml_client: MLClient, config: dict) -> bool:
 #         raise e
 
 def upload_data_to_datastore(ml_client: MLClient, local_data_path: str = "data/processed") -> str:
-    """Use local data path directly (simpler approach)."""
-    print("📁 Using local data path for training...")
+    """Upload processed data to Azure ML datastore."""
+    print("📤 Uploading data to Azure ML datastore...")
     
-    import os
+    from azure.ai.ml.entities import Data
+    from azure.ai.ml.constants import AssetTypes
     
-    # Check if data exists locally
-    abs_path = os.path.abspath(local_data_path)
+    try:
+        # Create data asset
+        data_asset = Data(
+            name=f"llama-training-data-{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            description="Processed training data for Llama fine-tuning",
+            type=AssetTypes.URI_FOLDER,
+            path=local_data_path
+        )
+        
+        # Upload to datastore
+        data_asset = ml_client.data.create_or_update(data_asset)
+        print(f"✅ Data uploaded successfully: {data_asset.name}:{data_asset.version}")
+        
+        return f"azureml:{data_asset.name}:{data_asset.version}"
+        
+    except Exception as e:
+        print(f"❌ Failed to upload data: {e}")
+        raise e
+
+# def upload_data_to_datastore(ml_client: MLClient, local_data_path: str = "data/processed") -> str:
+#     """Use local data path directly (simpler approach)."""
+#     print("📁 Using local data path for training...")
     
-    if not os.path.exists(abs_path):
-        raise FileNotFoundError(f"Data path not found: {abs_path}")
+#     import os
     
-    # List data files for verification
-    data_files = [f for f in os.listdir(abs_path) if f.endswith('.jsonl')]
-    print(f"✅ Found data files: {data_files}")
-    print(f"   Using path: {abs_path}")
+#     # Check if data exists locally
+#     abs_path = os.path.abspath(local_data_path)
     
-    return abs_path
+#     if not os.path.exists(abs_path):
+#         raise FileNotFoundError(f"Data path not found: {abs_path}")
+    
+#     # List data files for verification
+#     data_files = [f for f in os.listdir(abs_path) if f.endswith('.jsonl')]
+#     print(f"✅ Found data files: {data_files}")
+#     print(f"   Using path: {abs_path}")
+    
+#     return abs_path
 
 def create_training_job(
     ml_client: MLClient, 
@@ -144,41 +180,66 @@ def create_training_job(
     from azure.ai.ml.constants import AssetTypes, InputOutputModes
     
     # Define the command to run
-    command_str = """
-python src/training/train.py \
-    --config config/training_config.yaml \
-    --model_config config/model_config.yaml \
-    --data_dir ${{inputs.data}} \
-    --output_dir ${{outputs.model}}
-"""
-    
+#     command_str = """
+# #!/bin/bash
+# set -e
+# echo "Current directory: $(pwd)"
+# echo "Python path: $(which python)"
+
+# python -u src/training/train.py \
+#     --config config/training_config.yaml \
+#     --model_config config/model_config.yaml \
+#     --data_dir ${{inputs.data}} \
+#     --output_dir ${{outputs.model}}
+# """
+    #Added to use Azure existing CURATED Environment.
+    # command_str = """
+    #         #!/bin/bash
+    #         set -e
+    #         echo "=== Environment Info ==="
+    #         python --version
+    #         pip --version
+    #         nvidia-smi || echo "No nvidia-smi available"
+
+    #         echo "=== Installing Additional Packages ==="
+    #         pip install peft==0.8.2 trl==0.8.1 jsonlines==4.0.0 rouge-score==0.1.2 nltk==3.8.1 sentence-transformers==2.2.2
+    #         pip install "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git" --quiet || echo "Continuing without Unsloth - will use standard fine-tuning"
+
+    #         echo "=== Starting Training ==="
+    #         python -u src/training/train.py \
+    #             --config config/training_config.yaml \
+    #             --model_config config/model_config.yaml \
+    #             --data_dir ${{inputs.data}} \
+    #             --output_dir ${{outputs.model}}
+    #         """
+    command_str = "python src/training/train.py --config config/training_config.yaml --model_config config/model_config.yaml --data_dir ${{inputs.data}} --output_dir ${{outputs.model}}"
     # Create the job using the command function
     job = command(
         name=job_name,
         display_name=job_name,
         description="Fine-tune Llama-3.2-2B on corporate Q&A dataset using Unsloth",
-        experiment_name=azure_config.get('experiment', {}).get('name', 'llama-finetune'),
+        experiment_name='llama-finetune',
+        #experiment_name=azure_config.get('experiment', {}).get('name', 'llama-finetune'),
         
         # Compute and environment
         compute=azure_config['compute']['cluster_name'],
-        environment=f"{azure_config['environment']['name']}@latest",
+        environment=f"{azure_config['environment']['name']}:1",
+        #environment=f"{azure_config['environment']['name']}@latest",
         
         # Code and command
-        code="./",  # Upload current directory
+        code=".",  # Upload current directory
         command=command_str,
         
         # Inputs and outputs
         inputs={
             "data": Input(
                 type=AssetTypes.URI_FOLDER,
-                path=data_uri,
-                mode=InputOutputModes.RO_MOUNT
+                path=data_uri
             )
         },
         outputs={
             "model": Output(
-                type=AssetTypes.URI_FOLDER,
-                mode=InputOutputModes.RW_MOUNT
+                type=AssetTypes.URI_FOLDER
             )
         },
         

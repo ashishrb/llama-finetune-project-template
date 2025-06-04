@@ -9,12 +9,25 @@ import argparse
 from pathlib import Path
 from typing import Dict, List
 from datetime import datetime
-from src.training.utils import GPUMemoryManager, log_system_resources
+#from src.training.utils import GPUMemoryManager, log_system_resources
+
+try:
+    from .utils import GPUMemoryManager, log_system_resources
+except ImportError:
+    # Fallback for Azure ML environment
+    import sys
+    import os
+    sys.path.append(os.path.dirname(__file__))
+    from utils import GPUMemoryManager, log_system_resources
 
 # Add project root to path
-sys.path.append(os.path.join(os.path.dirname(__file__), "../.."))
+#sys.path.append(os.path.join(os.path.dirname(__file__), "../.."))
 
-from unsloth import FastLanguageModel
+try:
+    from unsloth import FastLanguageModel, is_bfloat16_supported
+except ImportError:
+    raise ImportError("Unsloth not available. Install with: pip install 'unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git'")
+
 from unsloth import is_bfloat16_supported
 from datasets import Dataset
 from transformers import TrainingArguments
@@ -52,6 +65,23 @@ def load_model_config(config_path: str = "config/model_config.yaml") -> Dict:
 def load_jsonl_data(file_path: str) -> List[Dict]:
     """Load data from JSONL file."""
     data = []
+    
+    # Handle both local and Azure ML paths
+    if not os.path.exists(file_path):
+        # Try common Azure ML data locations
+        alt_paths = [
+            file_path,
+            os.path.join("/tmp/data", os.path.basename(file_path)),
+            os.path.join(os.getcwd(), file_path)
+        ]
+        
+        for alt_path in alt_paths:
+            if os.path.exists(alt_path):
+                file_path = alt_path
+                break
+        else:
+            raise FileNotFoundError(f"Data file not found: {file_path}")
+    
     with open(file_path, 'r', encoding='utf-8') as f:
         for line in f:
             if line.strip():
@@ -322,10 +352,10 @@ def main():
     """Main training function."""
     parser = argparse.ArgumentParser(description="Fine-tune Llama model")
     parser = argparse.ArgumentParser(description="Fine-tune Llama model")
-    parser.add_argument("--config", type=str, default="config/training_config.yaml", 
-                       help="Path to training config")
-    parser.add_argument("--model_config", type=str, default="config/model_config.yaml", 
-                       help="Path to model config")
+    parser.add_argument("--config", type=str, default="./config/training_config.yaml", 
+                   help="Path to training config")
+    parser.add_argument("--model_config", type=str, default="./config/model_config.yaml", 
+                   help="Path to model config")
     parser.add_argument("--data_dir", type=str, default="data/processed", 
                        help="Directory containing processed data")
     parser.add_argument("--output_dir", type=str, default="output/models", 

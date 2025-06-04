@@ -11,12 +11,12 @@ compute:
   min_nodes: 0
   max_nodes: 4
   idle_seconds_before_scaledown: 300
-  
+
 environment:
-  name: "AzureML-pytorch-1.13-py38-cuda11.7-ubuntu20.04"
-  #conda_file: "environment.yaml"  
-  #docker:
-    #base_image: "mcr.microsoft.com/azureml/curated/pytorch-2.0-py38-cuda11.8-ubuntu20.04:latest"
+  name: "llama-final-tested-env-v2"
+  conda_file: "environment.yaml"
+  docker:
+    base_image: "mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu22.04:latest"
 
 experiment:
   name: "llama-3.2-2b-finetune"
