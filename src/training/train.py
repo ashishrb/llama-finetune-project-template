@@ -58,7 +58,7 @@ import wandb
 
 def setup_hf_auth():
     """Setup HuggingFace authentication."""
-    hf_token = os.environ.get("HF_TOKEN", "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")
+    hf_token = os.environ.get("HF_TOKEN", "<Your Token Here>")
     if hf_token:
         from huggingface_hub import login
         try:
