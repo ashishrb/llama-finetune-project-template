@@ -546,7 +546,7 @@ def save_model(model, tokenizer, trainer, output_dir: str, config: Dict):
 
 def main():
     if "HF_TOKEN" not in os.environ:
-        os.environ["HF_TOKEN"] = "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"
+        os.environ["HF_TOKEN"] = "<you token here>"
     """Main training function."""
     parser = argparse.ArgumentParser(description="Fine-tune Llama model")
     parser = argparse.ArgumentParser(description="Fine-tune Llama model")
