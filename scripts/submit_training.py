@@ -178,6 +178,7 @@ def create_training_job(
     from azure.ai.ml import command
     from azure.ai.ml import Input, Output
     from azure.ai.ml.constants import AssetTypes, InputOutputModes
+    from azure.ai.ml.entities import CommandJob, Environment
     
     # Define the command to run
 #     command_str = """
@@ -212,25 +213,73 @@ def create_training_job(
     #             --data_dir ${{inputs.data}} \
     #             --output_dir ${{outputs.model}}
     #         """
-    command_str = "python src/training/train.py --config config/training_config.yaml --model_config config/model_config.yaml --data_dir ${{inputs.data}} --output_dir ${{outputs.model}}"
+    #command_str = "python src/training/train.py --config config/training_config.yaml --model_config config/model_config.yaml --data_dir ${{inputs.data}} --output_dir ${{outputs.model}}"
+    
+    command_str = """
+                #!/bin/bash
+                set -e
+                echo "=== Installing Unsloth ==="
+                pip install "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git" --no-deps || echo "Unsloth installation failed, using fallback"
+                echo "=== Starting Training ==="
+                python src/training/train.py --config config/training_config.yaml --model_config config/model_config.yaml --data_dir ${{inputs.data}} --output_dir ${{outputs.model}}
+                """
+    
     # Create the job using the command function
-    job = command(
-        name=job_name,
+    # job = command(
+    #     name=job_name,
+    #     display_name=job_name,
+    #     description="Fine-tune Llama-3.2-2B on corporate Q&A dataset using Unsloth",
+    #     experiment_name='llama-finetune',
+    #     #experiment_name=azure_config.get('experiment', {}).get('name', 'llama-finetune'),
+        
+    #     # Compute and environment
+    #     compute=azure_config['compute']['cluster_name'],
+    #     environment=f"{azure_config['environment']['name']}:1",
+    #     #environment=f"{azure_config['environment']['name']}@latest",
+        
+    #     # Code and command
+    #     code=".",  # Upload current directory
+    #     command=command_str,
+        
+    #     # Inputs and outputs
+    #     inputs={
+    #         "data": Input(
+    #             type=AssetTypes.URI_FOLDER,
+    #             path=data_uri
+    #         )
+    #     },
+    #     outputs={
+    #         "model": Output(
+    #             type=AssetTypes.URI_FOLDER
+    #         )
+    #     },
+        
+    #     # Resource configuration
+    #     instance_count=1,  # Single node training
+        
+    #     # Tags for organization
+    #     tags={
+    #         "model": "llama-3.2-2b",
+    #         "task": "instruction-tuning",
+    #         "framework": "unsloth",
+    #         "dataset": "corporate-qa"
+    #     }
+    # )
+    
+    # Create job using CommandJob class directly
+    job = CommandJob(
         display_name=job_name,
-        description="Fine-tune Llama-3.2-2B on corporate Q&A dataset using Unsloth",
-        experiment_name='llama-finetune',
-        #experiment_name=azure_config.get('experiment', {}).get('name', 'llama-finetune'),
+        description="Fine-tune Llama-3.2-2B on corporate Q&A dataset",
         
         # Compute and environment
         compute=azure_config['compute']['cluster_name'],
-        environment=f"{azure_config['environment']['name']}:1",
-        #environment=f"{azure_config['environment']['name']}@latest",
+        environment=f"{azure_config['environment']['name']}@latest",
         
         # Code and command
-        code=".",  # Upload current directory
+        code=".",
         command=command_str,
         
-        # Inputs and outputs
+        # Inputs and outputs - simplified format
         inputs={
             "data": Input(
                 type=AssetTypes.URI_FOLDER,
@@ -239,22 +288,18 @@ def create_training_job(
         },
         outputs={
             "model": Output(
-                type=AssetTypes.URI_FOLDER
+                type=AssetTypes.URI_FOLDER,
+                mode=InputOutputModes.RW_MOUNT
             )
         },
         
-        # Resource configuration
-        instance_count=1,  # Single node training
-        
-        # Tags for organization
+        # Tags
         tags={
             "model": "llama-3.2-2b",
-            "task": "instruction-tuning",
-            "framework": "unsloth",
-            "dataset": "corporate-qa"
+            "framework": "transformers"
         }
     )
-    
+
     return job
 
 def submit_and_monitor_job(ml_client: MLClient, job: CommandJob, stream_logs: bool = True):

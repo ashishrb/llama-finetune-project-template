@@ -1,4 +1,4 @@
-name: llama-final-tested-env-v2
+name: llama-final-tested-env-v3
 channels:
   - conda-forge
 dependencies:
@@ -27,3 +27,5 @@ dependencies:
   - jsonlines
   - rouge-score
   - sentence-transformers
+  # ONLY ADDITION: Unsloth
+  - git+https://github.com/unslothai/unsloth.git

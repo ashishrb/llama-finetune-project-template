@@ -1,0 +1,30 @@
+# Core ML packages
+scikit-learn
+torch 
+torchvision 
+torchaudio
+transformers
+datasets
+peft
+accelerate
+bitsandbytes
+trl==0.7.10
+
+# Azure packages
+azure-ai-ml
+azure-identity
+mlflow
+
+# Evaluation packages
+nltk
+rouge-score
+bert-score
+sentence-transformers
+
+# Utility packages
+psutil
+tqdm
+pyyaml
+jsonlines
+wandb
+pytest

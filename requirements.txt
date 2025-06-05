@@ -1,29 +1,28 @@
-# Core ML packages
-scikit-learn
-torch 
-torchvision 
-torchaudio
-transformers
-datasets
-peft
-accelerate
-bitsandbytes
+# Step 1: PyTorch with CUDA to be executed seperatly in terminal, then proceed with "pip install -r requirements.txt"
+#pip install torch==2.1.0 torchvision==0.16.0 --index-url https://download.pytorch.org/whl/cu121
 
-# Azure packages
-azure-ai-ml
-azure-identity
-mlflow
 
-# Evaluation packages
-nltk
-rouge-score
-bert-score
-sentence-transformers
-
-# Utility packages
-psutil
+numpy<2.0
+transformers==4.52.4
+datasets==3.6.0
+accelerate==1.7.0
+peft==0.15.2
+bitsandbytes==0.41.3
+huggingface-hub==0.32.4
+wandb==0.20.0
+azureml-core==1.60.0.post1
+mlflow==2.22.0
+pandas
 tqdm
 pyyaml
 jsonlines
-wandb
+rouge-score
+nltk
+sentence-transformers
+
+# Additional for local development
+trl
+azure-ai-ml
+azure-identity
+psutil
 pytest

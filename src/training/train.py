@@ -1,4 +1,25 @@
 # src/training/train.py
+# import os
+# import sys
+# import json
+# import yaml
+# import torch
+# import mlflow
+import argparse
+from pathlib import Path
+from typing import Dict, List
+from datetime import datetime
+#from src.training.utils import GPUMemoryManager, log_system_resources
+
+# try:
+#     from .utils import GPUMemoryManager, log_system_resources
+# except ImportError:
+#     # Fallback for Azure ML environment
+#     import sys
+#     import os
+#     sys.path.append(os.path.dirname(__file__))
+#     from utils import GPUMemoryManager, log_system_resources
+
 import os
 import sys
 import json
@@ -9,26 +30,106 @@ import argparse
 from pathlib import Path
 from typing import Dict, List
 from datetime import datetime
-#from src.training.utils import GPUMemoryManager, log_system_resources
 
+# FIXED: Robust import path resolution for Azure ML
+def setup_imports():
+    """Setup import paths for both local and Azure ML environments."""
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.abspath(os.path.join(current_dir, "..", ".."))
+    
+    # Add paths to sys.path if not already present
+    paths_to_add = [
+        project_root,
+        current_dir,
+        os.path.join(project_root, "src"),
+        os.path.join(project_root, "src", "training")
+    ]
+    
+    for path in paths_to_add:
+        if path not in sys.path:
+            sys.path.insert(0, path)
+
+# Setup imports before trying to import custom modules
+setup_imports()
+
+# Now import custom modules with multiple fallback strategies
 try:
+    # Try relative import first
     from .utils import GPUMemoryManager, log_system_resources
-except ImportError:
-    # Fallback for Azure ML environment
-    import sys
-    import os
-    sys.path.append(os.path.dirname(__file__))
-    from utils import GPUMemoryManager, log_system_resources
+except (ImportError, ValueError):
+    try:
+        # Try direct import
+        from utils import GPUMemoryManager, log_system_resources
+    except ImportError:
+        try:
+            # Try with src.training prefix
+            from src.training.utils import GPUMemoryManager, log_system_resources
+        except ImportError:
+            # Final fallback - create minimal implementations
+            print("Warning: Could not import utils, using fallback implementations")
+            
+            class GPUMemoryManager:
+                def __init__(self): pass
+                def get_gpu_memory_info(self): return {'allocated_gb': 0, 'total_gb': 0, 'usage_percent': 0}
+                def clear_gpu_cache(self): 
+                    if torch.cuda.is_available(): torch.cuda.empty_cache()
+                def monitor_and_cleanup(self): pass
+                def log_memory_summary(self): 
+                    print("GPU memory monitoring not available")
+                def check_available_memory(self, required_gb): return True
+            
+            def log_system_resources():
+                print("System resource logging not available")
 
 # Add project root to path
 #sys.path.append(os.path.join(os.path.dirname(__file__), "../.."))
 
+# try:
+#     from unsloth import FastLanguageModel, is_bfloat16_supported
+# except ImportError:
+#     raise ImportError("Unsloth not available. Install with: pip install 'unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git'")
+
+# from unsloth import is_bfloat16_supported
+
 try:
     from unsloth import FastLanguageModel, is_bfloat16_supported
-except ImportError:
-    raise ImportError("Unsloth not available. Install with: pip install 'unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git'")
+    UNSLOTH_AVAILABLE = True
+    print("✅ Unsloth loaded successfully")
+except ImportError as e:
+    print(f"⚠️  Unsloth not available: {e}")
+    print("Falling back to standard transformers training...")
+    UNSLOTH_AVAILABLE = False
+    
+    # Fallback implementations
+    def is_bfloat16_supported():
+        return torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+    
+    class FastLanguageModel:
+        @staticmethod
+        def from_pretrained(model_name, max_seq_length=2048, dtype=None, load_in_4bit=True):
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                torch_dtype=dtype or torch.float16,
+                device_map="auto",
+                load_in_4bit=load_in_4bit
+            )
+            tokenizer = AutoTokenizer.from_pretrained(model_name)
+            return model, tokenizer
+        
+        @staticmethod
+        def get_peft_model(model, r=16, target_modules=None, lora_alpha=16, lora_dropout=0.1, bias="none", use_gradient_checkpointing=True, random_state=3407, use_rslora=False, loftq_config=None):
+            from peft import LoraConfig, get_peft_model
+            lora_config = LoraConfig(
+                r=r,
+                lora_alpha=lora_alpha,
+                target_modules=target_modules or ["q_proj", "k_proj", "v_proj", "o_proj"],
+                lora_dropout=lora_dropout,
+                bias=bias,
+                task_type="CAUSAL_LM"
+            )
+            return get_peft_model(model, lora_config)
 
-from unsloth import is_bfloat16_supported
 from datasets import Dataset
 from transformers import TrainingArguments
 from trl import SFTTrainer
@@ -109,9 +210,16 @@ def setup_model_and_tokenizer(model_config: Dict, training_config: Dict):
     print("Setting up model and tokenizer...")
     
     # ADD THIS: Initialize memory manager
-    memory_manager = GPUMemoryManager()
-    log_system_resources()
+    # memory_manager = GPUMemoryManager()
+    # log_system_resources()
     
+    try:
+        memory_manager = GPUMemoryManager()
+        log_system_resources()
+    except Exception as e:
+        print(f"Warning: Could not initialize memory manager: {e}")
+        memory_manager = None
+
     model_name = model_config['model']['base_model']
     max_seq_length = training_config['training']['max_seq_length']
     
@@ -257,7 +365,13 @@ def train_model(
     print("Setting up trainer...")
     
     # ADD THIS: Initialize memory manager for training
-    memory_manager = GPUMemoryManager()
+    #memory_manager = GPUMemoryManager()
+
+    try:
+        memory_manager = GPUMemoryManager()
+    except Exception as e:
+        print(f"Warning: Could not initialize memory manager: {e}")
+        memory_manager = None
     
     trainer = SFTTrainer(
         model=model,
@@ -308,7 +422,13 @@ def save_model(model, tokenizer, trainer, output_dir: str, config: Dict):
     """Save the trained model and tokenizer."""
     print("Saving model...")
     
-    memory_manager = GPUMemoryManager()
+    #memory_manager = GPUMemoryManager()
+
+    try:
+        memory_manager = GPUMemoryManager()
+    except Exception as e:
+    print(f"Warning: Could not initialize memory manager: {e}")
+        memory_manager = None
     
     # Check available disk space (rough estimate)
     import shutil

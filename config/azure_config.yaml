@@ -13,7 +13,7 @@ compute:
   idle_seconds_before_scaledown: 300
 
 environment:
-  name: "llama-final-tested-env-v2"
+  name: "llama-final-tested-env-v3"
   conda_file: "environment.yaml"
   docker:
     base_image: "mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu22.04:latest"
