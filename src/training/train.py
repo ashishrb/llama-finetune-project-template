@@ -1,25 +1,4 @@
 # src/training/train.py
-# import os
-# import sys
-# import json
-# import yaml
-# import torch
-# import mlflow
-import argparse
-from pathlib import Path
-from typing import Dict, List
-from datetime import datetime
-#from src.training.utils import GPUMemoryManager, log_system_resources
-
-# try:
-#     from .utils import GPUMemoryManager, log_system_resources
-# except ImportError:
-#     # Fallback for Azure ML environment
-#     import sys
-#     import os
-#     sys.path.append(os.path.dirname(__file__))
-#     from utils import GPUMemoryManager, log_system_resources
-
 import os
 import sys
 import json
@@ -28,15 +7,67 @@ import torch
 import mlflow
 import argparse
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 
-# FIXED: Robust import path resolution for Azure ML
+# Setup import paths
 def setup_imports():
     """Setup import paths for both local and Azure ML environments."""
     current_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.abspath(os.path.join(current_dir, "..", ".."))
     
+    paths_to_add = [
+        project_root,
+        current_dir,
+        os.path.join(project_root, "src"),
+        os.path.join(project_root, "src", "training")
+    ]
+    
+    for path in paths_to_add:
+        if path not in sys.path:
+            sys.path.insert(0, path)
+
+setup_imports()
+
+# Import custom modules
+try:
+    from .utils import GPUMemoryManager, log_system_resources
+except (ImportError, ValueError):
+    try:
+        from utils import GPUMemoryManager, log_system_resources
+    except ImportError:
+        from src.training.utils import GPUMemoryManager, log_system_resources
+
+# Standard transformer imports (no Unsloth)
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BitsAndBytesConfig,
+    TrainingArguments,
+    HfArgumentParser
+)
+from peft import (
+    LoraConfig,
+    get_peft_model,
+    prepare_model_for_kbit_training,
+    TaskType
+)
+from trl import SFTTrainer
+from datasets import Dataset
+import wandb
+
+def setup_hf_auth():
+    """Setup HuggingFace authentication."""
+    hf_token = os.environ.get("HF_TOKEN", "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")
+    if hf_token:
+        from huggingface_hub import login
+        try:
+            login(token=hf_token)
+            print("✅ HuggingFace authentication successful")
+        except Exception as e:
+            print(f"⚠️ HuggingFace authentication failed: {e}")
+            print("Continuing without authentication...")
+
     # Add paths to sys.path if not already present
     paths_to_add = [
         project_root,
@@ -199,92 +230,137 @@ def prepare_datasets(data_dir: str = "data/processed") -> tuple:
     print(f"Loaded {len(train_data)} training samples")
     print(f"Loaded {len(val_data)} validation samples")
     
+    # Format data for training
+    def format_data(samples):
+        """Format samples with the prompt template."""
+        formatted_samples = []
+        for sample in samples:
+            # The data already has 'text' field from preprocessing
+            if 'text' in sample:
+                formatted_samples.append({'text': sample['text']})
+            else:
+                # Fallback formatting if 'text' is missing
+                text = f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+
+{sample['system']}<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+{sample['instruction']}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+{sample['output']}<|eot_id|>"""
+                formatted_samples.append({'text': text})
+        return formatted_samples
+    
+    # Format datasets
+    train_formatted = format_data(train_data)
+    val_formatted = format_data(val_data)
+    
     # Convert to HuggingFace datasets
-    train_dataset = Dataset.from_list(train_data)
-    val_dataset = Dataset.from_list(val_data)
+    train_dataset = Dataset.from_list(train_formatted)
+    val_dataset = Dataset.from_list(val_formatted)
     
     return train_dataset, val_dataset
 
 def setup_model_and_tokenizer(model_config: Dict, training_config: Dict):
-    """Initialize model and tokenizer with Unsloth optimizations."""
+    """Initialize model and tokenizer with standard transformers."""
     print("Setting up model and tokenizer...")
     
-    # ADD THIS: Initialize memory manager
-    # memory_manager = GPUMemoryManager()
-    # log_system_resources()
+    # Initialize memory manager
+    memory_manager = GPUMemoryManager()
+    log_system_resources()
     
-    try:
-        memory_manager = GPUMemoryManager()
-        log_system_resources()
-    except Exception as e:
-        print(f"Warning: Could not initialize memory manager: {e}")
-        memory_manager = None
-
     model_name = model_config['model']['base_model']
     max_seq_length = training_config['training']['max_seq_length']
     
-    # Determine dtype - use bfloat16 if supported, otherwise float16
-    dtype = torch.bfloat16 if is_bfloat16_supported() else torch.float16
+    # Setup HuggingFace authentication
+    setup_hf_auth()
+    
+    # Quantization configuration for 4-bit
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_use_double_quant=True,
+    )
     
     print(f"Loading model: {model_name}")
     print(f"Max sequence length: {max_seq_length}")
-    print(f"Using dtype: {dtype}")
     
-    # ADD THIS: Check memory before model loading
+    # Check memory before model loading
+    estimated_memory_gb = 12.0  # 3B model estimate
+    if not memory_manager.check_available_memory(estimated_memory_gb):
+        memory_manager.clear_gpu_cache()
+    
     try:
-        # Estimate model memory requirement (rough estimate for Llama-2B)
-        estimated_memory_gb = 8.0  # Adjust based on your model size
-        if not memory_manager.check_available_memory(estimated_memory_gb):
-            memory_manager.clear_gpu_cache()
-        
-        # Load model and tokenizer with Unsloth optimizations
-        model, tokenizer = FastLanguageModel.from_pretrained(
-            model_name=model_name,
-            max_seq_length=max_seq_length,
-            dtype=dtype,
-            load_in_4bit=model_config['quantization']['load_in_4bit'],
-            # trust_remote_code=True,  # Uncomment if needed
+        # Load tokenizer
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_name,
+            trust_remote_code=True,
+            use_fast=True
         )
         
-        # ADD THIS: Log memory after model loading
+        # Setup tokenizer
+        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.padding_side = "right"
+        
+        # Load model with 4-bit quantization
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            quantization_config=bnb_config,
+            device_map="auto",
+            torch_dtype=torch.float16,
+            trust_remote_code=True,
+        )
+        
+        # Prepare model for k-bit training
+        model = prepare_model_for_kbit_training(model)
+        
+        # Log memory after model loading
         memory_manager.log_memory_summary()
         
-    except RuntimeError as e:
+        print("✅ Model and tokenizer loaded successfully")
+        
+    except Exception as e:
         if "out of memory" in str(e).lower():
             print("❌ GPU out of memory during model loading")
             memory_manager.clear_gpu_cache()
-            raise RuntimeError("GPU out of memory. Try reducing model size or using CPU.")
+            raise RuntimeError("GPU out of memory. Try reducing batch size.")
         raise e
-    
-    # Setup tokenizer
-    tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_side = "right"
     
     return model, tokenizer
 
 def setup_lora_model(model, training_config: Dict):
-    """Configure model for LoRA fine-tuning."""
+    """Configure model for LoRA fine-tuning using PEFT."""
     print("Setting up LoRA configuration...")
     
-    lora_config = training_config['training']['lora']
+    lora_config_dict = training_config['training']['lora']
     
-    # Add LoRA adapters
-    model = FastLanguageModel.get_peft_model(
-        model,
-        r=lora_config['r'],
-        target_modules=lora_config['target_modules'],
-        lora_alpha=lora_config['alpha'],
-        lora_dropout=lora_config['dropout'],
-        bias=lora_config['bias'],
-        use_gradient_checkpointing="unsloth",  # Use Unsloth's optimized checkpointing
-        random_state=3407,
-        use_rslora=False,  # Set to True for rank stabilized LoRA
-        loftq_config=None,  # LoftQ quantization
+    # Create LoRA configuration
+    lora_config = LoraConfig(
+        r=lora_config_dict['r'],
+        lora_alpha=lora_config_dict['alpha'],
+        target_modules=lora_config_dict['target_modules'],
+        lora_dropout=lora_config_dict['dropout'],
+        bias=lora_config_dict['bias'],
+        task_type=TaskType.CAUSAL_LM,
     )
     
-    print(f"LoRA rank: {lora_config['r']}")
-    print(f"LoRA alpha: {lora_config['alpha']}")
-    print(f"Target modules: {lora_config['target_modules']}")
+    # Apply LoRA to model
+    model = get_peft_model(model, lora_config)
+    
+    # Enable gradient checkpointing
+    model.enable_input_require_grads()
+    model.gradient_checkpointing_enable()
+    
+    # Print trainable parameters
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    all_params = sum(p.numel() for p in model.parameters())
+    trainable_percent = 100 * trainable_params / all_params
+    
+    print(f"LoRA configuration:")
+    print(f"  Rank: {lora_config_dict['r']}")
+    print(f"  Alpha: {lora_config_dict['alpha']}")
+    print(f"  Target modules: {lora_config_dict['target_modules']}")
+    print(f"  Trainable parameters: {trainable_params:,} ({trainable_percent:.2f}%)")
     
     return model
 
@@ -469,6 +545,8 @@ def save_model(model, tokenizer, trainer, output_dir: str, config: Dict):
         print(f"Warning: Could not log model to MLflow: {e}")
 
 def main():
+    if "HF_TOKEN" not in os.environ:
+        os.environ["HF_TOKEN"] = "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"
     """Main training function."""
     parser = argparse.ArgumentParser(description="Fine-tune Llama model")
     parser = argparse.ArgumentParser(description="Fine-tune Llama model")

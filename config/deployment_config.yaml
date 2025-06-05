@@ -31,9 +31,9 @@ deployment:
     name: "llama-inference-env"
     conda_file: "inference_environment.yaml"
     
-  # Resource requirements
+  # Resource requirements - UPDATED FOR 3B MODEL
   resources:
-    memory: "32Gi"
+    memory: "48Gi"  # Increased from 32Gi
     cpu: "8"
     gpu: "1"
     

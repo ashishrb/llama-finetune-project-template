@@ -1,28 +1,38 @@
-# Step 1: PyTorch with CUDA to be executed seperatly in terminal, then proceed with "pip install -r requirements.txt"
-#pip install torch==2.1.0 torchvision==0.16.0 --index-url https://download.pytorch.org/whl/cu121
+# Core dependencies
+torch==2.1.0
+transformers==4.37.0
+datasets==2.16.0
+accelerate==0.26.0
+peft==0.7.1
+bitsandbytes==0.42.0
+trl==0.7.10
 
+# ML and tracking
+huggingface-hub==0.20.0
+wandb==0.16.0
+mlflow==2.9.0
+azureml-core==1.55.0
 
+# Data processing
 numpy<2.0
-transformers==4.52.4
-datasets==3.6.0
-accelerate==1.7.0
-peft==0.15.2
-bitsandbytes==0.41.3
-huggingface-hub==0.32.4
-wandb==0.20.0
-azureml-core==1.60.0.post1
-mlflow==2.22.0
 pandas
-tqdm
-pyyaml
 jsonlines
-rouge-score
-nltk
-sentence-transformers
+pyyaml
 
-# Additional for local development
-trl
+# NLP and evaluation
+nltk
+rouge-score
+sentence-transformers
+sentencepiece
+protobuf
+
+# Utilities
+tqdm
+psutil
 azure-ai-ml
 azure-identity
-psutil
+einops
+scipy
+
+# Testing
 pytest

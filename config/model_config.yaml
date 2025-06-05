@@ -1,7 +1,6 @@
-# config/model_config.yaml
 model:
-  name: "llama-3.2-2b-corporate-qa"
-  base_model: "unsloth/llama-3.2-2b-instruct"
+  name: "llama-3.2-3b-corporate-qa"
+  base_model: "meta-llama/Llama-3.2-3B-Instruct"
   
   # Model parameters
   max_position_embeddings: 2048
@@ -20,7 +19,7 @@ model:
     eos_token_id: 128009  # Llama 3.2 eos token
     
 tokenizer:
-  model_name: "unsloth/llama-3.2-2b-instruct"
+  model_name: "meta-llama/Llama-3.2-3B-Instruct"
   add_eos_token: true
   add_bos_token: true
   truncation: true
@@ -32,8 +31,6 @@ quantization:
   bnb_4bit_quant_type: "nf4"
   bnb_4bit_use_double_quant: true
 
-# Unsloth specific optimizations
-unsloth:
-  max_seq_length: 2048
-  dtype: "float16"  # Use float16 for H100
-  load_in_4bit: true
+# HuggingFace authentication
+huggingface:
+  use_auth_token: true  # Will use HF_TOKEN environment variable
